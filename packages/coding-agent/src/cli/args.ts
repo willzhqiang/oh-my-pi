@@ -224,6 +224,9 @@ export function getExtraHelpText(): string {
   OPENCODE_API_KEY           - OpenCode Zen/OpenCode Go models
   CURSOR_ACCESS_TOKEN        - Cursor AI models
   AI_GATEWAY_API_KEY         - Vercel AI Gateway
+  CODEBUDDY_AUTH_TOKEN       - CodeBuddy bearer token (subscription/auth login)
+  CODEBUDDY_API_KEY          - CodeBuddy API key (Tencent Cloud)
+  CODEBUDDY_BASE_URL         - CodeBuddy base URL override (default: https://copilot.tencent.com/v2)
 
   ${chalk.dim("# Cloud Providers")}
   AWS_PROFILE                - AWS Bedrock (or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)

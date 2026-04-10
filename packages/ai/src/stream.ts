@@ -144,6 +144,7 @@ const serviceProviderMap: Record<string, KeyResolver> = {
 	venice: "VENICE_API_KEY",
 	vllm: "VLLM_API_KEY",
 	xiaomi: "XIAOMI_API_KEY",
+	codebuddy: () => $pickenv("CODEBUDDY_AUTH_TOKEN", "CODEBUDDY_API_KEY"),
 };
 
 /**

@@ -126,7 +126,8 @@ export type KnownProvider =
 	| "vllm"
 	| "xiaomi"
 	| "zenmux"
-	| "lm-studio";
+	| "lm-studio"
+	| "codebuddy";
 export type Provider = KnownProvider | string;
 
 import type { Effort } from "./model-thinking";

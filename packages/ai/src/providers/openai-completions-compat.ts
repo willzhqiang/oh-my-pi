@@ -53,6 +53,12 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 	const isAlibaba = provider === "alibaba-coding-plan" || baseUrl.includes("dashscope");
 	const isQwen = model.id.toLowerCase().includes("qwen");
 
+	const isCodeBuddy =
+		provider === "codebuddy" ||
+		baseUrl.includes("copilot.tencent.com") ||
+		baseUrl.includes("codebuddy.cn") ||
+		baseUrl.includes("codebuddy.ai");
+
 	const isNonStandard =
 		isCerebras ||
 		provider === "xai" ||
@@ -66,7 +72,8 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		isQwen ||
 		provider === "opencode-zen" ||
 		provider === "opencode-go" ||
-		baseUrl.includes("opencode.ai");
+		baseUrl.includes("opencode.ai") ||
+		isCodeBuddy;
 
 	const useMaxTokens = provider === "mistral" || baseUrl.includes("mistral.ai") || baseUrl.includes("chutes.ai");
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");

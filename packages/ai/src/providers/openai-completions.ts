@@ -553,6 +553,9 @@ async function createClient(
 	let copilotPremiumRequests: number | undefined;
 
 	let baseUrl = model.baseUrl;
+	if (model.provider === "codebuddy" && $env.CODEBUDDY_BASE_URL) {
+		baseUrl = $env.CODEBUDDY_BASE_URL;
+	}
 	if (model.provider === "github-copilot") {
 		const hasImages = hasCopilotVisionInput(context.messages);
 		const copilot = buildCopilotDynamicHeaders({
