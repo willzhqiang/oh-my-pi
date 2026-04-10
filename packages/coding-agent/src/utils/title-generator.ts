@@ -18,6 +18,10 @@ const DEFAULT_TERMINAL_TITLE = "π";
 const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 
 const MAX_INPUT_CHARS = 2000;
+const MAX_TITLE_LENGTH = 80;
+
+/** APIs that use agent protocols unsuitable for simple title generation. */
+const UNSUPPORTED_TITLE_APIS = new Set(["cursor-agent"]);
 
 function getTitleModel(
 	registry: ModelRegistry,
@@ -28,11 +32,11 @@ function getTitleModel(
 	if (availableModels.length === 0) return undefined;
 
 	const titleModel = resolveRoleSelection(["commit", "smol"], settings, availableModels);
-	if (titleModel) {
+	if (titleModel && !UNSUPPORTED_TITLE_APIS.has(titleModel.model.api)) {
 		return { model: titleModel.model, thinkingLevel: titleModel.thinkingLevel };
 	}
 
-	if (currentModel) {
+	if (currentModel && !UNSUPPORTED_TITLE_APIS.has(currentModel.api)) {
 		return { model: currentModel };
 	}
 
@@ -126,7 +130,14 @@ ${truncatedMessage}
 			return null;
 		}
 
-		return title.replace(/^["']|["']$/g, "").replace(/[.!?]$/, "");
+		title = title.replace(/^["']|["']$/g, "").replace(/[.!?]$/, "");
+
+		// Safety truncation: some providers may ignore maxTokens
+		if (title.length > MAX_TITLE_LENGTH) {
+			title = title.slice(0, MAX_TITLE_LENGTH).trimEnd();
+		}
+
+		return title;
 	} catch (err) {
 		logger.debug("title-generator: error", {
 			model: request.model,
