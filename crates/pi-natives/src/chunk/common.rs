@@ -414,16 +414,34 @@ pub fn recurse_class(node: Node<'_>) -> Option<RecurseSpec<'_>> {
 	resolve_recurse(node, ChunkContext::ClassBody)
 }
 
-pub fn recurse_interface(node: Node<'_>) -> Option<RecurseSpec<'_>> {
-	resolve_recurse(node, ChunkContext::ClassBody)
-}
-
 pub fn recurse_enum(node: Node<'_>) -> Option<RecurseSpec<'_>> {
 	resolve_recurse(node, ChunkContext::ClassBody)
 }
 
 pub fn recurse_value_container(node: Node<'_>) -> Option<RecurseSpec<'_>> {
 	resolve_value_container(node)
+}
+
+/// Try to promote a node that wraps a call expression with a trailing
+/// callback/block argument. Returns a named chunk candidate with `recurse`
+/// pointing into the callback body.
+///
+/// This is language-agnostic: it uses structural shape detection to find
+/// call-with-callback patterns in any language (JS `describe(...)`, Go
+/// `t.Run(...)`, Rust `tokio::spawn(async { ... })`, etc.).
+pub fn try_promote_call_with_callback<'tree>(
+	node: Node<'tree>,
+	source: &str,
+) -> Option<RawChunkCandidate<'tree>> {
+	let (func_node, body) = shape::trailing_callback_body(node)?;
+
+	// Extract a name from the call target (e.g. `describe`, `describe.serial`,
+	// `app.use`). Sanitize the raw source text (dots become underscores).
+	let name = sanitize_identifier(node_text(source, func_node.start_byte(), func_node.end_byte()));
+
+	let recurse = Some(RecurseSpec { node: body, context: ChunkContext::FunctionBody });
+
+	Some(make_kind_chunk(node, ChunkKind::Expression, name, source, recurse))
 }
 
 // ── Identifier extraction ────────────────────────────────────────────────
@@ -683,10 +701,6 @@ fn rust_function_signature(header: &str) -> Option<String> {
 }
 
 // ── Trivia and attribute detection ───────────────────────────────────────
-
-pub fn is_trivia(kind: &str) -> bool {
-	shape::is_generic_trivia_name(kind)
-}
 
 pub fn is_trivia_node(node: Node<'_>) -> bool {
 	shape::is_generic_trivia(node)

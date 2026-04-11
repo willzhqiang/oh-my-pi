@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+## [14.0.5] - 2026-04-11
+### Added
+
+- Added `designer` model role for UI/UX design tasks with Gemini 3.1 Pro as default model
+- Added support for model role fallback lists — roles can now resolve to multiple model patterns with automatic fallback to next available model
+- Added `extractReadableFromHtml` utility function to extract readable content from HTML with Readability article extraction and CSS selector fallback
+- Added support for GFM (GitHub Flavored Markdown) features including tables, strikethrough, and task lists in HTML-to-markdown conversion
+- Added `resolveDiagnosticTargets` utility function to handle glob pattern resolution with fallback to literal file paths for bracket-style paths
+
+### Changed
+
+- Clarified fenced code block editing behavior in markdown — the tool now preserves literal indentation inside fenced blocks, with content written verbatim as supplied
+- Updated guidance for inserting content after markdown section headings to use `after` on the heading chunk rather than `before`/`prepend` on the section itself
+- Reduced default image resize limits to 1568px (from 2000px) and 500KB (from 4.5MB) to match Anthropic's internal downscaling threshold and reduce payload sizes in tool calls
+- Adjusted screenshot compression to use 1024px max dimensions and 150KB budget for more aggressive optimization of browser screenshots in LLM requests
+- Updated JPEG quality defaults from 80 to 75 and refined quality ladder steps (70, 60, 50, 40) for tighter byte budgets
+- Improved image resize fast-path to skip re-encoding when images are already within dimensions and at ≤25% of byte budget, avoiding unnecessary processing of small icons and diagrams
+- Clarified that chunk names are truncated and must be copied from `read` or `?` output rather than constructed from source identifiers
+- Enhanced guidance for editing fenced code blocks in markdown to preserve exact whitespace using `raw` reads, as the tool normalizes tabs to spaces which can damage indentation-sensitive content
+- Updated designer agent to use `pi/designer` role alias instead of explicit model list
+- Refactored model role resolution to support multiple fallback patterns per role, improving model availability handling
+- Replaced regex-based HTML-to-markdown conversion with Turndown library and GFM plugin for more accurate formatting of complex HTML structures
+- Simplified no-changes response to omit redundant response text when chunk content already matches
+- Clarified region suffix behavior on leaf and compound statement chunks — `~` and `^` now fall back to whole-chunk replacement with explicit guidance to supply complete structural content
+- Updated CRC refresh guidance to direct users to use CRCs from edit responses or run `read(path="file", sel="?")`
+- Added clarification that region suffixes fall back to whole-chunk replacement for prose and data formats (markdown, YAML, JSON, fenced code blocks, frontmatter)
+- Documented `L20` shorthand syntax for single-line reads extending to end-of-file, with `L20-L20` for one-line windows
+- Refactored diagnostic target resolution to use new `resolveDiagnosticTargets` function, consolidating glob pattern detection and file matching logic
+- Updated chunk selector syntax from `@region` format to `~` (body) and `^` (head) suffixes for more concise region targeting
+- Simplified chunk edit documentation to use new `~` and `^` region syntax instead of `@head`, `@body`, `@tail`, `@decl` keywords
+- Replaced internal `raceAbort` function with imported `raceWithAbort` utility from pi-utils
+- Refactored cleanup timer to use async iterator pattern with `timers.setInterval` instead of `setInterval`
+- Made `#cleanupIdleSessions` synchronous and moved async cleanup loop logic to new `#runCleanupLoop` method
+- Replaced regex-based `htmlToBasicMarkdown` with a Turndown + GFM plugin pipeline (tables, strikethrough, task lists, nested lists now convert correctly). Added direct `turndown` and `turndown-plugin-gfm` dependencies
+
+### Fixed
+
+- Fixed chunk edit tool to report file-not-found error distinctly when attempting to use chunk selectors on non-existent files, with guidance to use write tool or verify the path
+- Fixed stale child selector reuse to correctly match chunks by checksum when multiple sibling chunks with the same name exist under the same parent
+- Fixed stale diagnostics being reused after unrelated file publishes by clearing cached diagnostics before refreshing file state
+- Fixed Codex search to use streamed answer text when final answer is an image placeholder or empty
+
 ## [14.0.4] - 2026-04-10
 ### Added
 
