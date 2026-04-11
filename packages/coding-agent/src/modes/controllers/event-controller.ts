@@ -347,7 +347,16 @@ export class EventController {
 				this.ctx.sessionManager.getCwd(),
 			);
 			component.setExpanded(this.ctx.toolOutputExpanded);
-			this.ctx.chatContainer.addChild(component);
+			if (this.ctx.streamingComponent) {
+				const idx = this.ctx.chatContainer.children.indexOf(this.ctx.streamingComponent);
+				if (idx !== -1) {
+					this.ctx.chatContainer.children.splice(idx, 0, component);
+				} else {
+					this.ctx.chatContainer.addChild(component);
+				}
+			} else {
+				this.ctx.chatContainer.addChild(component);
+			}
 			this.ctx.pendingTools.set(event.toolCallId, component);
 			this.ctx.ui.requestRender();
 		}
