@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [14.1.0] - 2026-04-11
+### Added
+
+- Added `accountId` to usage report metadata
+
+### Changed
+
+- Changed usage parsing to emit a usage report with available fields when parsing fails, rather than returning null
+
+### Fixed
+
+- Fixed `planType` resolution to fall back to the raw payload `plan_type` when parsed value is absent
+- Fixed usage metadata `raw` fallback to preserve the original payload when parsed raw output is missing
+
 ## [14.0.5] - 2026-04-11
 
 ### Changed
