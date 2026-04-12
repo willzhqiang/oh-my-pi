@@ -36403,7 +36403,7 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.13,
+				"input": 0.12,
 				"output": 0.39999999999999997,
 				"cacheRead": 0,
 				"cacheWrite": 0
@@ -37958,7 +37958,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 1047576,
-			"maxTokens": 32768
+			"maxTokens": 8888
 		},
 		"openai/gpt-4.1-mini": {
 			"id": "openai/gpt-4.1-mini",
@@ -38298,11 +38298,11 @@
 			"cost": {
 				"input": 0.049999999999999996,
 				"output": 0.39999999999999997,
-				"cacheRead": 0.005,
+				"cacheRead": 0.01,
 				"cacheWrite": 0
 			},
 			"contextWindow": 400000,
-			"maxTokens": 128000,
+			"maxTokens": 8888,
 			"thinking": {
 				"mode": "effort",
 				"minLevel": "minimal",
@@ -38348,7 +38348,7 @@
 			"cost": {
 				"input": 1.25,
 				"output": 10,
-				"cacheRead": 0.125,
+				"cacheRead": 0.13,
 				"cacheWrite": 0
 			},
 			"contextWindow": 400000,
@@ -38443,7 +38443,7 @@
 			"cost": {
 				"input": 0.25,
 				"output": 2,
-				"cacheRead": 0.024999999999999998,
+				"cacheRead": 0.03,
 				"cacheWrite": 0
 			},
 			"contextWindow": 272000,
@@ -38497,7 +38497,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 128000,
-			"maxTokens": 16384
+			"maxTokens": 32000
 		},
 		"openai/gpt-5.2-codex": {
 			"id": "openai/gpt-5.2-codex",
@@ -38803,7 +38803,7 @@
 			],
 			"cost": {
 				"input": 0.03,
-				"output": 0.11,
+				"output": 0.14,
 				"cacheRead": 0.015,
 				"cacheWrite": 0
 			},
@@ -41200,9 +41200,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 1.26,
-				"output": 3.9600000000000004,
-				"cacheRead": 0.26,
+				"input": 0.95,
+				"output": 3.15,
+				"cacheRead": 0.475,
 				"cacheWrite": 0
 			},
 			"contextWindow": 200000,
@@ -42480,9 +42480,53 @@
 				"supportsUsageInStreaming": false
 			}
 		},
+		"grok-4-20": {
+			"id": "grok-4-20",
+			"name": "grok-4-20",
+			"api": "openai-completions",
+			"provider": "venice",
+			"baseUrl": "https://api.venice.ai/api/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888,
+			"compat": {
+				"supportsUsageInStreaming": false
+			}
+		},
 		"grok-4-20-beta": {
 			"id": "grok-4-20-beta",
 			"name": "grok-4-20-beta",
+			"api": "openai-completions",
+			"provider": "venice",
+			"baseUrl": "https://api.venice.ai/api/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888,
+			"compat": {
+				"supportsUsageInStreaming": false
+			}
+		},
+		"grok-4-20-multi-agent": {
+			"id": "grok-4-20-multi-agent",
+			"name": "grok-4-20-multi-agent",
 			"api": "openai-completions",
 			"provider": "venice",
 			"baseUrl": "https://api.venice.ai/api/v1",
