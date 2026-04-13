@@ -39,6 +39,7 @@ import { STTController, type SttState } from "../stt";
 import type { ExitPlanModeDetails, LspStartupServerInfo } from "../tools";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
+import { getSessionAccentAnsi, getSessionAccentHexForTitle } from "../utils/session-color";
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
@@ -393,6 +394,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.start();
 		pushTerminalTitle();
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		this.updateEditorBorderColor();
 		this.#syncEditorMaxHeight();
 		this.isInitialized = true;
 		this.ui.requestRender(true);
@@ -531,8 +533,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		} else if (this.isPythonMode) {
 			this.editor.borderColor = theme.getPythonModeBorderColor();
 		} else {
-			const level = this.session.thinkingLevel ?? ThinkingLevel.Off;
-			this.editor.borderColor = theme.getThinkingBorderColor(level);
+			const hex = getSessionAccentHexForTitle(this.sessionManager.getSessionName(), this.sessionManager.titleSource);
+			const ansi = getSessionAccentAnsi(hex);
+			if (ansi) {
+				this.editor.borderColor = (str: string) => `${ansi}${str}\x1b[39m`;
+			} else {
+				const level = this.session.thinkingLevel ?? ThinkingLevel.Off;
+				this.editor.borderColor = theme.getThinkingBorderColor(level);
+			}
 		}
 		this.updateEditorTopBorder();
 		this.ui.requestRender();
@@ -1300,6 +1308,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleMoveCommand(targetPath: string): Promise<void> {
 		return this.#commandController.handleMoveCommand(targetPath);
+	}
+
+	handleRenameCommand(title: string): Promise<void> {
+		return this.#commandController.handleRenameCommand(title);
 	}
 
 	handleMemoryCommand(text: string): Promise<void> {

@@ -5687,8 +5687,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 144000,
-			"maxTokens": 32000,
+			"contextWindow": 136000,
+			"maxTokens": 64000,
 			"headers": {
 				"User-Agent": "opencode/1.3.15"
 			},
@@ -5716,7 +5716,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 160000,
+			"contextWindow": 168000,
 			"maxTokens": 32000,
 			"headers": {
 				"User-Agent": "opencode/1.3.15"
@@ -5744,8 +5744,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1000000,
-			"maxTokens": 64000,
+			"contextWindow": 168000,
+			"maxTokens": 32000,
 			"headers": {
 				"User-Agent": "opencode/1.3.15"
 			},
@@ -5773,7 +5773,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 216000,
+			"contextWindow": 128000,
 			"maxTokens": 16000,
 			"headers": {
 				"User-Agent": "opencode/1.3.15"
@@ -5801,7 +5801,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 144000,
+			"contextWindow": 168000,
 			"maxTokens": 32000,
 			"headers": {
 				"User-Agent": "opencode/1.3.15"
@@ -5829,7 +5829,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 200000,
+			"contextWindow": 168000,
 			"maxTokens": 32000,
 			"headers": {
 				"User-Agent": "opencode/1.3.15"
@@ -5951,7 +5951,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 128000,
+			"contextWindow": 136000,
 			"maxTokens": 64000,
 			"headers": {
 				"User-Agent": "opencode/1.3.15"
@@ -6012,7 +6012,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 128000,
+			"contextWindow": 64000,
 			"maxTokens": 4096,
 			"headers": {
 				"User-Agent": "opencode/1.3.15"
@@ -6069,7 +6069,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 264000,
+			"contextWindow": 128000,
 			"maxTokens": 64000,
 			"headers": {
 				"User-Agent": "opencode/1.3.15"
@@ -6097,7 +6097,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 264000,
+			"contextWindow": 128000,
 			"maxTokens": 64000,
 			"headers": {
 				"User-Agent": "opencode/1.3.15"
@@ -6209,8 +6209,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 264000,
-			"maxTokens": 64000,
+			"contextWindow": 272000,
+			"maxTokens": 128000,
 			"headers": {
 				"User-Agent": "opencode/1.3.15"
 			},
@@ -6293,7 +6293,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 400000,
+			"contextWindow": 272000,
 			"maxTokens": 128000,
 			"headers": {
 				"User-Agent": "opencode/1.3.15"
@@ -6321,7 +6321,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 400000,
+			"contextWindow": 272000,
 			"maxTokens": 128000,
 			"headers": {
 				"User-Agent": "opencode/1.3.15"
@@ -6349,7 +6349,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 128000,
+			"contextWindow": 192000,
 			"maxTokens": 64000,
 			"headers": {
 				"User-Agent": "opencode/1.3.15"

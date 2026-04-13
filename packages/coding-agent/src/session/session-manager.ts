@@ -58,6 +58,7 @@ export interface SessionHeader {
 	version?: number; // v1 sessions don't have this
 	id: string;
 	title?: string; // Auto-generated title from first message
+	titleSource?: "auto" | "user";
 	timestamp: string;
 	cwd: string;
 	parentSession?: string;
@@ -268,6 +269,7 @@ export type ReadonlySessionManager = Pick<
 	| "getSessionDir"
 	| "getSessionId"
 	| "getSessionFile"
+	| "getSessionName"
 	| "getArtifactsDir"
 	| "allocateArtifactPath"
 	| "saveArtifact"
@@ -1270,7 +1272,14 @@ async function collectSessionsFromFiles(files: string[], storage: SessionStorage
 				if (entries.length === 0) return;
 
 				// Check first entry for valid session header
-				type SessionHeaderShape = { type: string; id: string; cwd?: string; title?: string; timestamp: string };
+				type SessionHeaderShape = {
+					type: string;
+					id: string;
+					cwd?: string;
+					title?: string;
+					titleSource?: "auto" | "user";
+					timestamp: string;
+				};
 				const header = entries[0] as SessionHeaderShape;
 				if (header.type !== "session" || !header.id) return;
 
@@ -1378,6 +1387,7 @@ export async function resolveResumableSession(
 interface SessionManagerStateSnapshot {
 	sessionId: string;
 	sessionName: string | undefined;
+	titleSource: "auto" | "user" | undefined;
 	sessionFile: string | undefined;
 	flushed: boolean;
 	needsFullRewriteOnNextPersist: boolean;
@@ -1387,6 +1397,7 @@ interface SessionManagerStateSnapshot {
 export class SessionManager {
 	#sessionId: string = "";
 	#sessionName: string | undefined;
+	#titleSource: "auto" | "user" | undefined;
 	#sessionFile: string | undefined;
 	#flushed: boolean = false;
 	#needsFullRewriteOnNextPersist: boolean = false;
@@ -1438,6 +1449,7 @@ export class SessionManager {
 		return {
 			sessionId: this.#sessionId,
 			sessionName: this.#sessionName,
+			titleSource: this.#titleSource,
 			sessionFile: this.#sessionFile,
 			flushed: this.#flushed,
 			needsFullRewriteOnNextPersist: this.#needsFullRewriteOnNextPersist,
@@ -1450,6 +1462,7 @@ export class SessionManager {
 	restoreState(snapshot: SessionManagerStateSnapshot): void {
 		this.#sessionId = snapshot.sessionId;
 		this.#sessionName = snapshot.sessionName;
+		this.#titleSource = snapshot.titleSource;
 		this.#sessionFile = snapshot.sessionFile;
 		this.#flushed = snapshot.flushed;
 		this.#needsFullRewriteOnNextPersist = snapshot.needsFullRewriteOnNextPersist;
@@ -1489,6 +1502,7 @@ export class SessionManager {
 			const header = this.#fileEntries.find(e => e.type === "session") as SessionHeader | undefined;
 			this.#sessionId = header?.id ?? Snowflake.next();
 			this.#sessionName = header?.title;
+			this.#titleSource = header?.titleSource;
 
 			this.#needsFullRewriteOnNextPersist = migrateToCurrentVersion(this.#fileEntries);
 
@@ -1547,11 +1561,13 @@ export class SessionManager {
 			version: CURRENT_SESSION_VERSION,
 			id: this.#sessionId,
 			title: oldHeader?.title ?? this.#sessionName,
+			titleSource: oldHeader?.titleSource ?? this.#titleSource,
 			timestamp,
 			cwd: this.cwd,
 			parentSession: oldSessionId,
 		};
 		this.#sessionName = newHeader.title;
+		this.#titleSource = newHeader.titleSource;
 
 		// Replace the header in fileEntries
 		const entries = this.#fileEntries.filter((e): e is SessionEntry => e.type !== "session");
@@ -1666,6 +1682,7 @@ export class SessionManager {
 		this.#persistErrorReported = false;
 		this.#sessionId = Snowflake.next();
 		this.#sessionName = undefined;
+		this.#titleSource = undefined;
 		const timestamp = new Date().toISOString();
 		const header: SessionHeader = {
 			type: "session",
@@ -1953,17 +1970,43 @@ export class SessionManager {
 		return manager.getPath(id);
 	}
 
+	/** The source that set the session name: "user" (manual /rename or RPC) or "auto" (generated title). */
+	get titleSource(): "auto" | "user" | undefined {
+		return this.#titleSource;
+	}
+
 	getSessionName(): string | undefined {
 		return this.#sessionName;
 	}
 
-	async setSessionName(name: string): Promise<void> {
-		this.#sessionName = name;
+	/** Strip C0/C1 control characters (includes ESC, so removes ANSI sequences) and collapse whitespace. */
+	static #sanitizeName(name: string): string {
+		return name
+			.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+			.replace(/ +/g, " ")
+			.trim();
+	}
+
+	/**
+	 * Set the session display name.
+	 * @param source - "user" for explicit renames (/rename command, RPC); "auto" for generated titles.
+	 *   Auto-generated titles are silently ignored when the user has already set a name.
+	 */
+	async setSessionName(name: string, source: "auto" | "user" = "auto"): Promise<boolean> {
+		// User-set names take permanent precedence over auto-generated ones.
+		if (this.#titleSource === "user" && source === "auto") return false;
+
+		const sanitized = SessionManager.#sanitizeName(name);
+		if (!sanitized) return false;
+
+		this.#sessionName = sanitized;
+		this.#titleSource = source;
 
 		// Update the in-memory header (so first flush includes title)
 		const header = this.#fileEntries.find(e => e.type === "session") as SessionHeader | undefined;
 		if (header) {
-			header.title = name;
+			header.title = sanitized;
+			header.titleSource = source;
 		}
 
 		// Update the session file header with the title (if already flushed)
@@ -1971,6 +2014,7 @@ export class SessionManager {
 		if (this.persist && sessionFile && this.storage.existsSync(sessionFile)) {
 			await this.#rewriteFile();
 		}
+		return true;
 	}
 
 	_persist(entry: SessionEntry): void {
@@ -2630,8 +2674,10 @@ export class SessionManager {
 		manager.#newSessionSync({ parentSession: sourceHeader?.id });
 		const newHeader = manager.#fileEntries[0] as SessionHeader;
 		newHeader.title = sourceHeader?.title;
+		newHeader.titleSource = sourceHeader?.titleSource;
 		manager.#fileEntries = [newHeader, ...historyEntries];
 		manager.#sessionName = newHeader.title;
+		manager.#titleSource = newHeader.titleSource;
 		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
 		manager.#buildIndex();
 		await manager.#rewriteFile();

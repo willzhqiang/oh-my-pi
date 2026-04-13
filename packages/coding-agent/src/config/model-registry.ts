@@ -720,31 +720,6 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 	} as Model<Api>);
 }
 
-function buildCustomModel(
-	providerName: string,
-	providerBaseUrl: string,
-	providerApi: Api | undefined,
-	providerHeaders: Record<string, string> | undefined,
-	providerApiKey: string | undefined,
-	authHeader: boolean | undefined,
-	providerCompat: Model<Api>["compat"] | undefined,
-	modelDef: CustomModelDefinitionLike,
-	options: CustomModelBuildOptions,
-): Model<Api> | undefined {
-	const model = buildCustomModelOverlay(
-		providerName,
-		providerBaseUrl,
-		providerApi,
-		providerHeaders,
-		providerApiKey,
-		authHeader,
-		providerCompat,
-		modelDef,
-	);
-	if (!model) return undefined;
-	return finalizeCustomModel(model, options);
-}
-
 function normalizeSuppressedSelector(selector: string): string {
 	const trimmed = selector.trim();
 	if (!trimmed) return trimmed;
@@ -790,6 +765,12 @@ export class ModelRegistry {
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
 	#lastDiscoveryWarnings: Map<string, string> = new Map();
+	// Runtime extension model overlays — persist across refresh() cycles so that
+	// models registered by extensions survive the model selector's offline reload.
+	#runtimeModelOverlays: CustomModelOverlay[] = [];
+	#runtimeProviderApiKeys: Map<string, string> = new Map();
+	#runtimeProvidersBySource: Map<string, Set<string>> = new Map();
+	#runtimeProviderSourceByName: Map<string, string> = new Map();
 
 	/**
 	 * @param authStorage - Auth storage for API key resolution
@@ -854,6 +835,11 @@ export class ModelRegistry {
 		this.#customProviderApiKeys.clear();
 		this.#keylessProviders.clear();
 		this.#discoverableProviders = [];
+		// Restore runtime API keys before #loadModels — survives because
+		// #loadModels only calls .set() on #customProviderApiKeys, never reassigns it.
+		for (const [k, v] of this.#runtimeProviderApiKeys) {
+			this.#customProviderApiKeys.set(k, v);
+		}
 		this.#providerOverrides.clear();
 		this.#modelOverrides.clear();
 		this.#equivalenceConfig = undefined;
@@ -893,7 +879,9 @@ export class ModelRegistry {
 		const builtInModels = this.#applyHardcodedModelPolicies(this.#loadBuiltInModels(overrides));
 		const cachedDiscoveries = this.#applyHardcodedModelPolicies(this.#loadCachedDiscoverableModels());
 		const resolvedDefaults = this.#mergeResolvedModels(builtInModels, cachedDiscoveries);
-		const combined = this.#mergeCustomModels(resolvedDefaults, this.#customModelOverlays);
+		const withConfigModels = this.#mergeCustomModels(resolvedDefaults, this.#customModelOverlays);
+		// Merge runtime extension models so they survive refresh() cycles
+		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
 
 		this.#models = this.#applyModelOverrides(combined, this.#modelOverrides);
 		this.#rebuildCanonicalIndex();
@@ -1183,7 +1171,9 @@ export class ModelRegistry {
 			}),
 		);
 		const resolved = this.#mergeResolvedModels(this.#models, discoveredModels);
-		const combined = this.#mergeCustomModels(resolved, this.#customModelOverlays);
+		const withConfigModels = this.#mergeCustomModels(resolved, this.#customModelOverlays);
+		// Merge runtime extension models so they survive online discovery completion
+		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
 		this.#models = this.#applyModelOverrides(combined, this.#modelOverrides);
 		this.#rebuildCanonicalIndex();
 	}
@@ -1931,6 +1921,21 @@ export class ModelRegistry {
 	clearSourceRegistrations(sourceId: string): void {
 		unregisterCustomApis(sourceId);
 		unregisterOAuthProviders(sourceId);
+		const sourceProviders = this.#runtimeProvidersBySource.get(sourceId);
+		if (!sourceProviders || sourceProviders.size === 0) {
+			return;
+		}
+		this.#runtimeProvidersBySource.delete(sourceId);
+		for (const providerName of sourceProviders) {
+			if (this.#runtimeProviderSourceByName.get(providerName) !== sourceId) {
+				continue;
+			}
+			this.#runtimeProviderSourceByName.delete(providerName);
+			this.#runtimeProviderApiKeys.delete(providerName);
+			this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(overlay => overlay.provider !== providerName);
+		}
+		this.#reloadStaticModels();
+		this.#rebuildCanonicalIndex();
 	}
 
 	/**
@@ -1989,15 +1994,30 @@ export class ModelRegistry {
 
 		if (sourceId) {
 			this.#registeredProviderSources.add(sourceId);
+			const previousSourceId = this.#runtimeProviderSourceByName.get(providerName);
+			if (previousSourceId && previousSourceId !== sourceId) {
+				const previousProviders = this.#runtimeProvidersBySource.get(previousSourceId);
+				previousProviders?.delete(providerName);
+				if (previousProviders && previousProviders.size === 0) {
+					this.#runtimeProvidersBySource.delete(previousSourceId);
+				}
+			}
+			const sourceProviders = this.#runtimeProvidersBySource.get(sourceId) ?? new Set<string>();
+			sourceProviders.add(providerName);
+			this.#runtimeProvidersBySource.set(sourceId, sourceProviders);
+			this.#runtimeProviderSourceByName.set(providerName, sourceId);
 		}
 		if (config.apiKey) {
 			this.#customProviderApiKeys.set(providerName, config.apiKey);
+			// Persist runtime API keys so they survive #reloadStaticModels() cycles
+			this.#runtimeProviderApiKeys.set(providerName, config.apiKey);
 		}
 
 		if (config.models && config.models.length > 0) {
-			const nextModels = this.#models.filter(m => m.provider !== providerName);
+			// Build model overlays that persist across refresh() cycles
+			const newOverlays: CustomModelOverlay[] = [];
 			for (const modelDef of config.models) {
-				const model = buildCustomModel(
+				const overlay = buildCustomModelOverlay(
 					providerName,
 					config.baseUrl!,
 					config.api,
@@ -2006,12 +2026,20 @@ export class ModelRegistry {
 					config.authHeader,
 					config.compat,
 					modelDef as CustomModelDefinitionLike,
-					{ useDefaults: true },
 				);
-				if (!model) {
+				if (!overlay) {
 					throw new Error(`Provider ${providerName}, model ${modelDef.id}: no "api" specified.`);
 				}
-				nextModels.push(model);
+				newOverlays.push(overlay);
+			}
+			// Store as runtime overlays so they survive #reloadStaticModels()
+			this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(m => m.provider !== providerName);
+			this.#runtimeModelOverlays.push(...newOverlays);
+
+			// Also update #models immediately for the current cycle
+			const nextModels = this.#models.filter(m => m.provider !== providerName);
+			for (const overlay of newOverlays) {
+				nextModels.push(finalizeCustomModel(overlay, { useDefaults: true }));
 			}
 
 			if (config.oauth?.modifyModels) {

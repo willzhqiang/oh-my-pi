@@ -1,13 +1,25 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Added
 
 - Added support for `computeHashlineDiff` to accept hashline edits with `loc` and `content` payloads without requiring pre-resolved `op` fields
+- Added `/rename <title>` slash command to set an explicit session name, updating the session header and terminal tab title ([#658](https://github.com/can1357/oh-my-pi/issues/658))
+- Added `session_name` status line segment: displays the session name in the status bar right side with a stable hash-derived accent color unique to each name; shown in all presets when a name is set
 
 ### Changed
 
 - Changed eager todo enforcement to only apply on the first user message of a conversation, skipping subsequent user turns that may correct, clarify, or redirect the prior task
+
+### Fixed
+
+- Fixed tool execution output to return the original `toolResult` text content from tools instead of sanitizing it before sending completion messages
+- Fixed session accent rendering in the status line and editor to reset only foreground color (`\x1b[39m`) so applying a session color no longer clears other ANSI styles
+- Session name sanitization: strip C0/C1 control characters (including ANSI ESC) from session names at storage time and in status line rendering, preventing escape sequence injection into TUI output
+- Auto-generated session titles no longer overwrite a name set via `/rename`: `setSessionName` now tracks whether the name was set by the user or auto-generated and silently ignores auto titles once a user name is in place; terminal title follows the same guard
+- Session accent border color now applied on session resume and after auto-title generation, not only after an explicit `/rename`
+- Fixed retained Python kernel ownership so `AgentSession.dispose()` only shuts down kernels owned by that session, including warmup-created kernels
 
 ## [14.1.0] - 2026-04-11
 ### Added
@@ -92,6 +104,10 @@
 - Fixed stale diagnostics being reused after unrelated file publishes by clearing cached diagnostics before refreshing file state
 - Fixed Codex search to use streamed answer text when final answer is an image placeholder or empty
 
+### Fixed
+
+- Fixed MCP config docs and schema to use `~/.omp/agent/mcp.json` for user-scoped OMP-native MCP config while keeping project config at `<cwd>/.omp/mcp.json`
+
 ## [14.0.4] - 2026-04-10
 ### Added
 
@@ -111,6 +127,7 @@
 ### Fixed
 
 - Fixed typo in system prompt: 'backwards compatibiltity' → 'backwards compatibility'
+
 
 ## [14.0.3] - 2026-04-09
 

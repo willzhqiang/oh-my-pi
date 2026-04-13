@@ -116,7 +116,7 @@ describe("chunk mode regression coverage", () => {
 		expect(updatedSource).not.toContain("## Inserted\n\ninserted body\n## Beta");
 	});
 
-	it("preserves the blank line before the next markdown section on ~.append", async () => {
+	it("preserves the blank line before the next markdown section on append", async () => {
 		const filePath = path.join(tmpDir, "spacing-append.md");
 		await Bun.write(filePath, "# Title\n\n## Alpha\n\nalpha body\n\n## Beta\n\nbeta body\n");
 		const session = createSession(tmpDir);
@@ -130,7 +130,7 @@ describe("chunk mode regression coverage", () => {
 			path: filePath,
 			edits: [
 				{
-					sel: `${selector}~`,
+					sel: selector,
 					op: "append",
 					content: "\nextra paragraph\n",
 				},
@@ -138,7 +138,8 @@ describe("chunk mode regression coverage", () => {
 		} as never);
 
 		const updatedSource = await Bun.file(filePath).text();
-		expect(updatedSource).toContain("alpha body\n\n    extra paragraph\n\n## Beta");
-		expect(updatedSource).not.toContain("alpha body\n\n    extra paragraph\n## Beta");
+		expect(updatedSource).toContain("alpha body\n\nextra paragraph\n\n## Beta");
+		expect(updatedSource).not.toContain("alpha body\n\nextra paragraph\n## Beta");
+		expect(updatedSource).not.toContain("alpha body\n\n    extra paragraph");
 	});
 });
