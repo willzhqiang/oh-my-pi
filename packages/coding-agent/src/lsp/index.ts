@@ -20,6 +20,7 @@ import {
 	setIdleTimeout,
 	syncContent,
 	WARMUP_TIMEOUT_MS,
+	waitForProjectLoaded,
 } from "./client";
 import { getLinterClient } from "./clients";
 import { getServersForFile, type LspConfig, loadConfig } from "./config";
@@ -1426,6 +1427,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const position = { line: resolvedLine - 1, character: resolvedCharacter };
 
 			let output: string;
+
+			// Wait for project loading to complete before cross-file operations
+			// to ensure the server has indexed all project files.
+			const crossFileActions = new Set(["definition", "type_definition", "implementation", "references", "rename"]);
+			if (crossFileActions.has(action)) {
+				await waitForProjectLoaded(client, signal);
+			}
 
 			switch (action) {
 				// =====================================================================

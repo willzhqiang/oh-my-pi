@@ -1,6 +1,13 @@
 # Changelog
 
 ## [Unreleased]
+
+## [14.1.1] - 2026-04-14
+
+### Breaking Changes
+
+- Removed the `searchDb` constructor argument from `CombinedAutocompleteProvider`, requiring callers to use the built-in search behavior
+
 ### Changed
 
 - Changed truncation debug logging to run only when `debugRedraw` is enabled

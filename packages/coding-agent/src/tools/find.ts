@@ -244,17 +244,20 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 							maxResults: effectiveLimit,
 							sortByMtime: true,
 							gitignore: useGitignore,
+							signal: combinedSignal,
 						},
 						onMatch,
-						this.session.searchDb,
 					),
 				);
 
 			try {
 				let result = await doGlob(true);
-				if (result.matches.length === 0) {
+				if (result.matches.length === 0 && !timeoutSignal.aborted) {
 					result = await doGlob(false);
 				}
+				// Sort by mtime descending (most recent first) in JS instead of native.
+				// This allows native glob to early-terminate at maxResults.
+				result.matches.sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0));
 				matches = result.matches;
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") {

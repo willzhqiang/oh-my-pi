@@ -84,9 +84,17 @@ pub fn max_cache_entries() -> usize {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct CacheKey {
-	root:           PathBuf,
-	include_hidden: bool,
-	use_gitignore:  bool,
+	root:              PathBuf,
+	include_hidden:    bool,
+	use_gitignore:     bool,
+	skip_node_modules: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ScanOptions {
+	pub include_hidden:    bool,
+	pub use_gitignore:     bool,
+	pub skip_node_modules: bool,
 }
 
 #[derive(Clone)]
@@ -199,12 +207,34 @@ pub fn classify_file_type(path: &Path) -> Option<(FileType, Option<f64>)> {
 
 /// Builds a deterministic filesystem walker configured for visibility and
 /// ignore rules.
-pub fn build_walker(root: &Path, include_hidden: bool, use_gitignore: bool) -> WalkBuilder {
+///
+/// When `skip_node_modules` is true, `node_modules` directories are pruned at
+/// traversal time (not just filtered post-scan). `.git` is always skipped.
+pub fn build_walker(
+	root: &Path,
+	include_hidden: bool,
+	use_gitignore: bool,
+	skip_node_modules: bool,
+) -> WalkBuilder {
 	let mut builder = WalkBuilder::new(root);
 	builder
 		.hidden(!include_hidden)
 		.follow_links(false)
-		.sort_by_file_path(|a, b| a.cmp(b));
+		.sort_by_file_path(|a, b| a.cmp(b))
+		// filter_entry controls whether to yield an entry AND whether to descend
+		// into a directory. Returning false for a directory skips the entire subtree.
+		.filter_entry(move |entry| {
+			let name = entry.file_name().to_str().unwrap_or_default();
+			// Always skip .git
+			if name == ".git" {
+				return false;
+			}
+			// Skip node_modules when skip_node_modules is true
+			if skip_node_modules && name == "node_modules" {
+				return false;
+			}
+			true
+		});
 
 	if use_gitignore {
 		// Honor repository and global ignore files for repo-like behavior.
@@ -229,16 +259,13 @@ pub fn build_walker(root: &Path, include_hidden: bool, use_gitignore: bool) -> W
 
 /// Scans filesystem entries and records normalized relative paths with file
 /// metadata.
-///
-/// Always stores `node_modules` entries; caller-side filtering handles
-/// exclusion.
 fn collect_entries(
 	root: &Path,
-	include_hidden: bool,
-	use_gitignore: bool,
+	options: ScanOptions,
 	ct: &task::CancelToken,
 ) -> Result<Vec<GlobMatch>> {
-	let builder = build_walker(root, include_hidden, use_gitignore);
+	let builder =
+		build_walker(root, options.include_hidden, options.use_gitignore, options.skip_node_modules);
 	let mut entries = Vec::new();
 
 	for entry in builder.build() {
@@ -246,10 +273,6 @@ fn collect_entries(
 
 		let Ok(entry) = entry else { continue };
 		let path = entry.path();
-		if should_skip_path(path, true) {
-			// The cache always stores node_modules; caller-side filtering is applied later.
-			continue;
-		}
 
 		let relative = normalize_relative_path(root, path);
 		if relative.is_empty() {
@@ -279,18 +302,22 @@ fn collect_entries(
 /// empty.
 pub fn get_or_scan(
 	root: &Path,
-	include_hidden: bool,
-	use_gitignore: bool,
+	options: ScanOptions,
 	ct: &task::CancelToken,
 ) -> Result<ScanResult> {
 	let ttl = *CACHE_TTL_MS;
 	if ttl == 0 {
 		// Caching disabled – always scan fresh.
-		let entries = collect_entries(root, include_hidden, use_gitignore, ct)?;
+		let entries = collect_entries(root, options, ct)?;
 		return Ok(ScanResult { entries, cache_age_ms: 0 });
 	}
 
-	let key = CacheKey { root: root.to_path_buf(), include_hidden, use_gitignore };
+	let key = CacheKey {
+		root:              root.to_path_buf(),
+		include_hidden:    options.include_hidden,
+		use_gitignore:     options.use_gitignore,
+		skip_node_modules: options.skip_node_modules,
+	};
 
 	let now = Instant::now();
 	if let Some(entry) = FS_CACHE.get(&key) {
@@ -305,7 +332,7 @@ pub fn get_or_scan(
 		FS_CACHE.remove(&key);
 	}
 
-	let entries = collect_entries(root, include_hidden, use_gitignore, ct)?;
+	let entries = collect_entries(root, options, ct)?;
 	FS_CACHE.insert(key, CacheEntry { created_at: now, entries: entries.clone() });
 	evict_oldest();
 	Ok(ScanResult { entries, cache_age_ms: 0 })
@@ -318,15 +345,19 @@ pub fn get_or_scan(
 /// returned without repopulating the cache.
 pub fn force_rescan(
 	root: &Path,
-	include_hidden: bool,
-	use_gitignore: bool,
+	options: ScanOptions,
 	store: bool,
 	ct: &task::CancelToken,
 ) -> Result<Vec<GlobMatch>> {
-	let key = CacheKey { root: root.to_path_buf(), include_hidden, use_gitignore };
+	let key = CacheKey {
+		root:              root.to_path_buf(),
+		include_hidden:    options.include_hidden,
+		use_gitignore:     options.use_gitignore,
+		skip_node_modules: options.skip_node_modules,
+	};
 	FS_CACHE.remove(&key);
 
-	let entries = collect_entries(root, include_hidden, use_gitignore, ct)?;
+	let entries = collect_entries(root, options, ct)?;
 	if store {
 		let now = Instant::now();
 		FS_CACHE.insert(key, CacheEntry { created_at: now, entries: entries.clone() });
@@ -448,5 +479,129 @@ mod tests {
 		make_fifo(&fifo);
 
 		assert_eq!(classify_file_type(&fifo), None);
+	}
+
+	#[test]
+	fn build_walker_skips_git_and_node_modules() {
+		let root = TempDirGuard::new();
+		fs::create_dir_all(root.path().join(".git/objects")).unwrap();
+		fs::write(root.path().join(".git/objects/a.txt"), "git obj").unwrap();
+		fs::create_dir_all(root.path().join("node_modules/pkg")).unwrap();
+		fs::write(root.path().join("node_modules/pkg/index.js"), "nm").unwrap();
+		fs::write(root.path().join("real.txt"), "ok").unwrap();
+
+		// skip_node_modules: true -> should only see real.txt
+		let walker = super::build_walker(root.path(), true, false, true);
+		let paths: Vec<String> = walker
+			.build()
+			.filter_map(|e| e.ok())
+			.filter(|e| e.path() != root.path())
+			.map(|e| {
+				e.path()
+					.strip_prefix(root.path())
+					.unwrap()
+					.to_string_lossy()
+					.into_owned()
+			})
+			.collect();
+		assert!(
+			!paths
+				.iter()
+				.any(|p| p.contains("node_modules") || p.contains(".git")),
+			"expected no .git or node_modules entries, got: {paths:?}"
+		);
+		assert!(paths.iter().any(|p| p == "real.txt"), "expected real.txt, got: {paths:?}");
+
+		// skip_node_modules: false -> should see node_modules but not .git
+		let walker = super::build_walker(root.path(), true, false, false);
+		let paths: Vec<String> = walker
+			.build()
+			.filter_map(|e| e.ok())
+			.filter(|e| e.path() != root.path())
+			.map(|e| {
+				e.path()
+					.strip_prefix(root.path())
+					.unwrap()
+					.to_string_lossy()
+					.into_owned()
+			})
+			.collect();
+		assert!(
+			!paths.iter().any(|p| p.contains(".git")),
+			"expected no .git entries, got: {paths:?}"
+		);
+		assert!(
+			paths.iter().any(|p| p.contains("node_modules")),
+			"expected node_modules entries, got: {paths:?}"
+		);
+	}
+
+	#[test]
+	fn collect_entries_skips_node_modules() {
+		let root = TempDirGuard::new();
+		fs::create_dir_all(root.path().join("node_modules/pkg")).unwrap();
+		fs::write(root.path().join("node_modules/pkg/index.js"), "nm").unwrap();
+		fs::write(root.path().join("real.txt"), "ok").unwrap();
+
+		let ct = crate::task::CancelToken::default();
+		let entries = super::collect_entries(
+			root.path(),
+			super::ScanOptions {
+				include_hidden:    true,
+				use_gitignore:     false,
+				skip_node_modules: true,
+			},
+			&ct,
+		)
+		.unwrap();
+		let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+		assert!(
+			!paths.iter().any(|p| p.contains("node_modules")),
+			"expected no node_modules entries, got: {paths:?}"
+		);
+		assert!(paths.iter().any(|p| p == &"real.txt"), "expected real.txt, got: {paths:?}");
+	}
+
+	#[test]
+	fn force_rescan_respects_skip_node_modules() {
+		let root = TempDirGuard::new();
+		// Create a nested node_modules with many files
+		for i in 0..100 {
+			let pkg_dir = root.path().join(format!("node_modules/pkg-{i}"));
+			fs::create_dir_all(&pkg_dir).unwrap();
+			fs::write(pkg_dir.join("index.js"), "x").unwrap();
+		}
+		fs::write(root.path().join("app.js"), "ok").unwrap();
+
+		let ct = crate::task::CancelToken::default();
+
+		// With skip: should only get app.js
+		let entries = super::force_rescan(
+			root.path(),
+			super::ScanOptions {
+				include_hidden:    true,
+				use_gitignore:     false,
+				skip_node_modules: true,
+			},
+			false,
+			&ct,
+		)
+		.unwrap();
+		assert_eq!(entries.len(), 1, "skip=true got: {}", entries.len());
+		assert_eq!(entries[0].path, "app.js");
+
+		// Without skip: should get app.js + 100 node_modules files + directories
+		let entries = super::force_rescan(
+			root.path(),
+			super::ScanOptions {
+				include_hidden:    true,
+				use_gitignore:     false,
+				skip_node_modules: false,
+			},
+			false,
+			&ct,
+		)
+		.unwrap();
+		assert!(entries.len() > 100, "skip=false got: {}", entries.len());
 	}
 }

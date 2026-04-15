@@ -70,6 +70,18 @@ pub fn apply_edits(state: &ChunkState, params: &EditParams) -> Result<EditResult
 	let initial_parse_errors = state.tree.parse_errors;
 	let initial_chunk_paths: std::collections::HashSet<String> =
 		state.tree.chunks.iter().map(|c| c.path.clone()).collect();
+	let initial_chunks_by_path: std::collections::HashMap<String, ChunkNode> = state
+		.tree
+		.chunks
+		.iter()
+		.map(|chunk| (chunk.path.clone(), chunk.clone()))
+		.collect();
+	let initial_chunk_checksums: std::collections::HashMap<String, String> = state
+		.tree
+		.chunks
+		.iter()
+		.map(|chunk| (chunk.path.clone(), chunk.checksum.clone()))
+		.collect();
 	let normalize_indent = params.normalize_indent.unwrap_or(true);
 	let mut touched_paths = Vec::new();
 	let mut warnings = Vec::new();
@@ -104,7 +116,7 @@ pub fn apply_edits(state: &ChunkState, params: &EditParams) -> Result<EditResult
 		last_scheduled = Some(scheduled.clone());
 		let operation = normalize_operation_literals(&scheduled.operation);
 		let result = match operation.op {
-			ChunkEditOp::Replace => apply_replace(
+			ChunkEditOp::Put => apply_put(
 				&mut state,
 				&operation,
 				&scheduled,
@@ -112,6 +124,16 @@ pub fn apply_edits(state: &ChunkState, params: &EditParams) -> Result<EditResult
 				current_default_crc.as_deref(),
 				file_indent_step,
 				file_indent_char,
+				normalize_indent,
+				&mut touched_paths,
+				&mut warnings,
+			),
+			ChunkEditOp::Replace => apply_find_replace(
+				&mut state,
+				&operation,
+				&scheduled,
+				current_default_selector,
+				current_default_crc.as_deref(),
 				normalize_indent,
 				&mut touched_paths,
 				&mut warnings,
@@ -286,6 +308,8 @@ pub fn apply_edits(state: &ChunkState, params: &EditParams) -> Result<EditResult
 			&diff_after,
 			params.anchor_style,
 			&touched_paths,
+			&initial_chunk_checksums,
+			&initial_chunks_by_path,
 			normalize_indent,
 		)
 	} else {
@@ -353,7 +377,7 @@ fn resolve_edit_target(
 	if chunk.prologue_end_byte.is_none()
 		|| chunk.epilogue_start_byte.is_none()
 		|| python_leaf_control_flow
-		|| (chunk.kind == ChunkKind::Section && matches!(operation.op, ChunkEditOp::Replace))
+		|| (chunk.kind == ChunkKind::Section && matches!(operation.op, ChunkEditOp::Put))
 	{
 		region = None;
 	}
@@ -361,7 +385,164 @@ fn resolve_edit_target(
 	Ok(ResolvedEditTarget { chunk, region })
 }
 
-fn apply_replace(
+/// Re-indent replacement content to match the original matched source's
+/// indentation. Detects the base indent of the first line in `original` and
+/// applies it to `replacement`.
+fn reindent_replacement(original: &str, replacement: &str) -> String {
+	let orig_indent = original
+		.lines()
+		.next()
+		.map_or("", |l| &l[..l.len() - l.trim_start().len()]);
+	let repl_indent = replacement
+		.lines()
+		.find(|l| !l.trim().is_empty())
+		.map_or("", |l| &l[..l.len() - l.trim_start().len()]);
+
+	if orig_indent == repl_indent {
+		return replacement.to_string();
+	}
+
+	replacement
+		.lines()
+		.enumerate()
+		.map(|(i, line)| {
+			if line.trim().is_empty() {
+				line.to_string()
+			} else if i == 0 {
+				format!("{orig_indent}{}", line.trim_start())
+			} else {
+				let stripped = line.strip_prefix(repl_indent).unwrap_or(line);
+				format!("{orig_indent}{stripped}")
+			}
+		})
+		.collect::<Vec<_>>()
+		.join("\n")
+}
+
+/// Try to find `needle` in `haystack` by normalizing leading whitespace on each
+/// line. Returns `(byte_offset, byte_length)` of the match in `haystack`.
+fn find_indent_normalized(haystack: &str, needle: &str) -> Option<(usize, usize)> {
+	let needle_trimmed: Vec<&str> = needle.lines().map(|l| l.trim_start()).collect();
+	if needle_trimmed.is_empty() {
+		return None;
+	}
+	let haystack_lines: Vec<(usize, &str)> = haystack
+		.split('\n')
+		.scan(0usize, |offset, line| {
+			let start = *offset;
+			*offset += line.len() + 1; // +1 for the \n
+			Some((start, line))
+		})
+		.collect();
+
+	let mut matches = Vec::new();
+	'outer: for i in 0..haystack_lines.len() {
+		if i + needle_trimmed.len() > haystack_lines.len() {
+			break;
+		}
+		for (j, needle_line) in needle_trimmed.iter().enumerate() {
+			if haystack_lines[i + j].1.trim_start() != *needle_line {
+				continue 'outer;
+			}
+		}
+		let start = haystack_lines[i].0;
+		let last_idx = i + needle_trimmed.len() - 1;
+		let end = haystack_lines[last_idx].0 + haystack_lines[last_idx].1.len();
+		matches.push((start, end - start));
+	}
+	if matches.len() == 1 {
+		Some(matches[0])
+	} else {
+		None // 0 or ambiguous
+	}
+}
+
+fn apply_find_replace(
+	state: &mut ChunkStateInner,
+	operation: &EditOperation,
+	scheduled: &ScheduledEditOperation,
+	default_selector: Option<&str>,
+	default_crc: Option<&str>,
+	normalize_indent: bool,
+	touched_paths: &mut Vec<String>,
+	warnings: &mut Vec<String>,
+) -> Result<(), String> {
+	let target = resolve_edit_target(
+		state,
+		operation,
+		scheduled,
+		default_selector,
+		default_crc,
+		true,
+		touched_paths.as_slice(),
+		warnings,
+	)?;
+	let anchor = target.chunk;
+
+	let (region_start, region_end) = match target.region {
+		None => (anchor.start_byte as usize, anchor.end_byte as usize),
+		Some(r) => chunk_region_range(&anchor, r),
+	};
+
+	let find = operation.find.as_deref().unwrap_or_default();
+	if find.is_empty() {
+		return Err(format!(
+			"replace on {}: 'find' cannot be empty.",
+			describe_scheduled_operation(scheduled)
+		));
+	}
+
+	let chunk_source = &state.source[region_start..region_end];
+
+	// Try exact match first, then fall back to indent-normalized match.
+	let (rel_offset, match_len) = if let Some((off, _)) = {
+		let mut m = chunk_source.match_indices(find);
+		let first = m.next();
+		if first.is_some() && m.next().is_some() {
+			let total = 2 + chunk_source.match_indices(find).skip(2).count();
+			return Err(format!(
+				"replace on {}: 'find' is ambiguous ({} matches in chunk). Extend 'find' with \
+				 surrounding context so exactly one match remains.",
+				anchor.path, total
+			));
+		}
+		first
+	} {
+		(off, find.len())
+	} else if normalize_indent && let Some((off, len)) = find_indent_normalized(chunk_source, find) {
+		(off, len)
+	} else {
+		return Err(format!(
+			"replace on {}: 'find' text not found inside chunk. Re-read the file to confirm current \
+			 content.",
+			anchor.path
+		));
+	};
+
+	let raw_replacement = operation.content.as_deref().unwrap_or_default();
+	let abs_start = region_start + rel_offset;
+	let abs_end = abs_start + match_len;
+
+	// Re-indent replacement to match the matched source's indentation when
+	// indent normalization is active.
+	let matched_source = &state.source[abs_start..abs_end];
+	let replacement = if normalize_indent {
+		reindent_replacement(matched_source, raw_replacement)
+	} else {
+		raw_replacement.to_string()
+	};
+
+	let mut new_source =
+		String::with_capacity(state.source.len() - matched_source.len() + replacement.len());
+	new_source.push_str(&state.source[..abs_start]);
+	new_source.push_str(&replacement);
+	new_source.push_str(&state.source[abs_end..]);
+	replace_source_and_adjust_conflicts(state, new_source, warnings);
+	touched_paths.push(anchor.path);
+	Ok(())
+}
+
+fn apply_put(
 	state: &mut ChunkStateInner,
 	operation: &EditOperation,
 	scheduled: &ScheduledEditOperation,
@@ -394,56 +575,6 @@ fn apply_replace(
 	}
 
 	let requested_region = requested_region_for_operation(operation, default_selector, default_crc);
-
-	let (mut region_start, region_end) = match target.region {
-		None => (anchor.start_byte as usize, anchor.end_byte as usize),
-		Some(r) => chunk_region_range(&anchor, r),
-	};
-	if matches!(target.region, Some(ChunkRegion::Head)) {
-		region_start =
-			line_start_offset(&line_offsets(&state.source), anchor.start_line, &state.source);
-	}
-
-	// Scoped find/replace: locate a literal substring inside the chunk and replace
-	// it.
-	if let Some(find) = operation.find.as_deref() {
-		if find.is_empty() {
-			return Err(format!(
-				"find/replace on {}: 'find' cannot be empty. Omit 'find' for whole-chunk replace.",
-				describe_scheduled_operation(scheduled)
-			));
-		}
-
-		let chunk_source = &state.source[region_start..region_end];
-		let mut matches = chunk_source.match_indices(find);
-		let Some((rel_offset, _)) = matches.next() else {
-			return Err(format!(
-				"find/replace on {}: 'find' text not found inside chunk. Re-read the file to confirm \
-				 current content, or use whole-chunk replace.",
-				anchor.path
-			));
-		};
-		if matches.next().is_some() {
-			let total = 2 + chunk_source.match_indices(find).skip(2).count();
-			return Err(format!(
-				"find/replace on {}: 'find' is ambiguous ({} matches in chunk). Extend 'find' with \
-				 surrounding context so exactly one match remains, or use whole-chunk replace.",
-				anchor.path, total
-			));
-		}
-
-		let replacement = operation.content.as_deref().unwrap_or_default();
-		let abs_start = region_start + rel_offset;
-		let abs_end = abs_start + find.len();
-		let mut new_source =
-			String::with_capacity(state.source.len() - find.len() + replacement.len());
-		new_source.push_str(&state.source[..abs_start]);
-		new_source.push_str(replacement);
-		new_source.push_str(&state.source[abs_end..]);
-		replace_source_and_adjust_conflicts(state, new_source, warnings);
-		touched_paths.push(anchor.path);
-		return Ok(());
-	}
 
 	let initial_target_indent =
 		target_indent_for_region(state, &anchor, target.region, file_indent_char, file_indent_step);
@@ -1426,7 +1557,7 @@ fn resolve_insertion_point(
 			body_insertion_point(state, anchor, true, file_indent_char, file_indent_step),
 			InsertPosition::LastChild,
 		)),
-		(_, ChunkEditOp::Replace | ChunkEditOp::Delete) => {
+		(_, ChunkEditOp::Put | ChunkEditOp::Replace | ChunkEditOp::Delete) => {
 			Err("Internal error: insertion point requested for non-insert op".to_owned())
 		},
 	}
@@ -1779,6 +1910,8 @@ fn display_path_for_file(file_path: &str, cwd: &str) -> String {
 struct DiffHunk {
 	header:    String,
 	lines:     Vec<String>,
+	old_start: u32,
+	old_len:   u32,
 	new_start: u32,
 }
 
@@ -1837,10 +1970,66 @@ fn generate_diff_hunks(before: &str, after: &str, context: usize) -> Vec<DiffHun
 			}
 		}
 
-		hunks.push(DiffHunk { header, lines: hunk_lines, new_start: new_start as u32 });
+		hunks.push(DiffHunk {
+			header,
+			lines: hunk_lines,
+			old_start: old_start as u32,
+			old_len: old_len as u32,
+			new_start: new_start as u32,
+		});
 	}
 
 	hunks
+}
+
+fn deleted_chunk_anchor_label(chunk: &ChunkNode, style: ChunkAnchorStyle) -> String {
+	match style {
+		ChunkAnchorStyle::Full | ChunkAnchorStyle::FullOmit => chunk.path.clone(),
+		ChunkAnchorStyle::Kind
+		| ChunkAnchorStyle::KindOmit
+		| ChunkAnchorStyle::Bare
+		| ChunkAnchorStyle::None => chunk.kind.path_segment(chunk.identifier.as_deref()),
+	}
+}
+
+fn deleted_chunk_anchor_indent(
+	chunk: &ChunkNode,
+	normalize_indent: bool,
+	file_indent_char: char,
+	file_indent_step: usize,
+	tab_replacement: &str,
+) -> String {
+	let indent_char = if chunk.indent_char.is_empty() {
+		file_indent_char.to_string()
+	} else {
+		chunk.indent_char.clone()
+	};
+	let raw_indent = indent_char.repeat(chunk.indent as usize);
+	if normalize_indent {
+		normalize_to_tabs(&raw_indent, file_indent_char, file_indent_step)
+	} else {
+		raw_indent.replace('\t', tab_replacement)
+	}
+}
+
+fn deleted_hunk_owner<'a>(
+	hunk: &DiffHunk,
+	before_chunks: &'a HashMap<String, ChunkNode>,
+	current_lookup: &HashMap<&str, &ChunkNode>,
+	touched_paths: &[String],
+) -> Option<&'a ChunkNode> {
+	if hunk.old_len == 0 {
+		return None;
+	}
+	let old_end = hunk
+		.old_start
+		.saturating_add(hunk.old_len.saturating_sub(1));
+	touched_paths
+		.iter()
+		.filter(|path| !current_lookup.contains_key(path.as_str()))
+		.filter_map(|path| before_chunks.get(path))
+		.filter(|chunk| chunk.start_line <= old_end && hunk.old_start <= chunk.end_line)
+		.min_by_key(|chunk| chunk.line_count)
 }
 
 /// Render the response text for a changed file, combining the current chunked
@@ -1852,17 +2041,16 @@ fn render_changed_hunks(
 	after: &str,
 	anchor_style: Option<ChunkAnchorStyle>,
 	touched_paths: &[String],
+	before_checksums: &std::collections::HashMap<String, String>,
+	before_chunks: &HashMap<String, ChunkNode>,
 	normalize_indent: bool,
 ) -> String {
-	use std::collections::HashMap;
+	use std::collections::{HashMap, HashSet};
 
 	let show_leaf_preview = state.language == "tlaplus";
 	let focused_paths = compute_focus(state.tree(), touched_paths);
 	let hunks = generate_diff_hunks(before, after, 0);
 
-	// Map each hunk to the chunk that should display it.
-	// Walk from the deepest containing chunk upward until we find one that
-	// has children (and therefore a closing tag in the tree output).
 	let tree = state.tree();
 	let tab_replacement = if normalize_indent {
 		NORMALIZED_TAB_REPLACEMENT
@@ -1874,39 +2062,111 @@ fn render_changed_hunks(
 	let lookup: HashMap<&str, &ChunkNode> =
 		tree.chunks.iter().map(|c| (c.path.as_str(), c)).collect();
 	let render_indent = normalize_indent.then_some((file_indent_char, file_indent_step));
-
 	let mut inline_hunks: HashMap<String, Vec<crate::chunk::render::InlineHunk>> = HashMap::new();
-	let mut orphan_hunks: Vec<&DiffHunk> = Vec::new();
+	let mut changed_anchor_paths = HashSet::new();
+	let style = anchor_style.unwrap_or_default();
 
 	for hunk in &hunks {
-		// Find the deepest chunk containing this hunk's new-file start line.
-		let owner = crate::chunk::render::find_hunk_owner_chunk(tree, &lookup, hunk.new_start);
-		match owner {
-			Some(chunk_path) => {
-				let indent = crate::chunk::render::hunk_indent_for_chunk(
-					&lookup,
-					chunk_path,
-					state.source(),
-					tab_replacement,
-					render_indent,
-				);
-				let mut lines = Vec::with_capacity(hunk.lines.len() + 1);
-				lines.push(format!("{indent}{}", hunk.header));
-				for line in &hunk.lines {
-					let normalized =
-						render_hunk_line(line, normalize_indent, file_indent_char, file_indent_step);
-					lines.push(format!("{indent}{normalized}"));
-				}
-				inline_hunks
-					.entry(chunk_path.to_owned())
-					.or_default()
-					.push(crate::chunk::render::InlineHunk { lines });
-			},
-			None => orphan_hunks.push(hunk),
+		if let Some(deleted_chunk) = deleted_hunk_owner(hunk, before_chunks, &lookup, touched_paths) {
+			let owner_path = deleted_chunk
+				.parent_path
+				.as_deref()
+				.unwrap_or("")
+				.to_owned();
+			let anchor_indent = deleted_chunk_anchor_indent(
+				deleted_chunk,
+				normalize_indent,
+				file_indent_char,
+				file_indent_step,
+				tab_replacement,
+			);
+			let diff_indent = if normalize_indent {
+				format!("{anchor_indent}\t")
+			} else {
+				format!("{anchor_indent}{tab_replacement}")
+			};
+			let anchor_label = deleted_chunk_anchor_label(deleted_chunk, style);
+			let mut lines = Vec::with_capacity(hunk.lines.len() + 2);
+			lines.push(crate::chunk::render::InlineHunkLine {
+				text:   style.render(
+					&anchor_indent,
+					anchor_label.as_str(),
+					deleted_chunk.checksum.as_str(),
+				),
+				marker: Some('-'),
+			});
+			lines.push(crate::chunk::render::InlineHunkLine {
+				text:   format!("{diff_indent}{}", hunk.header),
+				marker: None,
+			});
+			for line in &hunk.lines {
+				let normalized =
+					render_hunk_line(line, normalize_indent, file_indent_char, file_indent_step);
+				lines.push(crate::chunk::render::InlineHunkLine {
+					text:   format!("{diff_indent}{normalized}"),
+					marker: None,
+				});
+			}
+			inline_hunks
+				.entry(owner_path)
+				.or_default()
+				.push(crate::chunk::render::InlineHunk { lines });
+			continue;
+		}
+
+		let owner_path =
+			crate::chunk::render::find_hunk_owner_chunk(tree, &lookup, hunk.new_start).unwrap_or("");
+		let indent = if owner_path.is_empty() {
+			String::new()
+		} else {
+			crate::chunk::render::hunk_indent_for_chunk(
+				&lookup,
+				owner_path,
+				state.source(),
+				tab_replacement,
+				render_indent,
+			)
+		};
+		let mut lines = Vec::with_capacity(hunk.lines.len() + 1);
+		lines.push(crate::chunk::render::InlineHunkLine {
+			text:   format!("{indent}{}", hunk.header),
+			marker: None,
+		});
+		for line in &hunk.lines {
+			let normalized =
+				render_hunk_line(line, normalize_indent, file_indent_char, file_indent_step);
+			lines.push(crate::chunk::render::InlineHunkLine {
+				text:   format!("{indent}{normalized}"),
+				marker: None,
+			});
+		}
+		inline_hunks
+			.entry(owner_path.to_owned())
+			.or_default()
+			.push(crate::chunk::render::InlineHunk { lines });
+	}
+
+	for path in touched_paths {
+		let mut current = Some(path.as_str());
+		while let Some(chunk_path) = current {
+			if chunk_path.is_empty() {
+				break;
+			}
+			let Some(chunk) = lookup.get(chunk_path) else {
+				current = chunk_path.rfind('.').map(|dot| &chunk_path[..dot]);
+				continue;
+			};
+			if before_checksums
+				.get(&chunk.path)
+				.is_none_or(|previous| previous != &chunk.checksum)
+			{
+				changed_anchor_paths.insert(chunk.path.clone());
+			}
+			current = chunk.parent_path.as_deref();
 		}
 	}
 
-	let tree_text = crate::chunk::render::render_state_with_hunks(
+	crate::chunk::render::render_state_with_hunks(
 		state,
 		&RenderParams {
 			chunk_path: Some(String::new()),
@@ -1922,31 +2182,12 @@ fn render_changed_hunks(
 			focused_paths,
 		},
 		inline_hunks,
-	);
-
-	if orphan_hunks.is_empty() {
-		return tree_text;
-	}
-
-	// Append orphan hunks (not belonging to any named chunk) at the end.
-	let orphan_text = orphan_hunks
-		.iter()
-		.flat_map(|hunk| {
-			let mut lines = Vec::with_capacity(hunk.lines.len() + 1);
-			lines.push(hunk.header.clone());
-			lines.extend(hunk.lines.iter().map(|line| {
-				render_hunk_line(line, normalize_indent, file_indent_char, file_indent_step)
-			}));
-			lines
-		})
-		.collect::<Vec<_>>()
-		.join("\n");
-
-	format!("{tree_text}\n\n{orphan_text}")
+		changed_anchor_paths,
+	)
 }
 
-/// Build a focus list that includes touched chunks as Expanded, their
-/// immediate siblings as Collapsed, and all ancestors as Container.
+/// Build a focus list that includes touched chunks as Expanded and all
+/// ancestors as Container.
 /// Falls back to no focus (full render) when more than 20 chunks were touched.
 fn compute_focus(
 	tree: &crate::chunk::types::ChunkTree,
@@ -2000,23 +2241,6 @@ fn compute_focus(
 			current = lookup
 				.get(parent_path)
 				.and_then(|p| p.parent_path.as_deref());
-		}
-
-		// Immediate prev/next sibling -> Collapsed.
-		if let Some(parent_path) = chunk.parent_path.as_deref()
-			&& let Some(parent) = lookup.get(parent_path)
-			&& let Some(idx) = parent.children.iter().position(|p| p == path)
-		{
-			if idx > 0 {
-				focus
-					.entry(parent.children[idx - 1].clone())
-					.or_insert(ChunkFocusMode::Collapsed);
-			}
-			if idx + 1 < parent.children.len() {
-				focus
-					.entry(parent.children[idx + 1].clone())
-					.or_insert(ChunkFocusMode::Collapsed);
-			}
 		}
 	}
 
@@ -2148,7 +2372,7 @@ mod tests {
 
 		let result = apply_edits(&state, &EditParams {
 			operations:       vec![EditOperation {
-				op:      ChunkEditOp::Replace,
+				op:      ChunkEditOp::Put,
 				sel:     Some("fn_main".to_owned()),
 				crc:     Some(chunk.checksum.clone()),
 				region:  None,
@@ -2193,7 +2417,7 @@ mod tests {
 
 		let result = apply_edits(&state, &EditParams {
 			operations:       vec![EditOperation {
-				op:      ChunkEditOp::Replace,
+				op:      ChunkEditOp::Put,
 				sel:     Some("class_Foo.fn_increm".to_owned()),
 				crc:     Some(chunk.checksum.clone()),
 				region:  Some(ChunkRegion::Body),
@@ -2238,7 +2462,7 @@ mod tests {
 		assert_eq!(chunk.start_line, 1, "chunk should start at the attribute line");
 
 		let result = apply_single_edit(&state, "test.rs", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some("fn_close".to_owned()),
 			crc:     Some(chunk.checksum.clone()),
 			region:  None,
@@ -2266,7 +2490,7 @@ mod tests {
 
 		let result = apply_edits(&state, &EditParams {
 			operations:       vec![EditOperation {
-				op:      ChunkEditOp::Replace,
+				op:      ChunkEditOp::Put,
 				sel:     Some("run".to_owned()),
 				crc:     Some(chunk.checksum.clone()),
 				region:  None,
@@ -2306,7 +2530,7 @@ mod tests {
 
 		let result = apply_edits(&state, &EditParams {
 			operations:       vec![EditOperation {
-				op:      ChunkEditOp::Replace,
+				op:      ChunkEditOp::Put,
 				sel:     Some("fuzzyM".to_owned()),
 				crc:     Some(chunk.checksum.clone()),
 				region:  None,
@@ -2341,7 +2565,7 @@ mod tests {
 
 		let result = apply_edits(&state, &EditParams {
 			operations:       vec![EditOperation {
-				op:      ChunkEditOp::Replace,
+				op:      ChunkEditOp::Put,
 				sel:     Some("box.ts".to_owned()),
 				crc:     Some(chunk.checksum.clone()),
 				region:  None,
@@ -2369,7 +2593,7 @@ mod tests {
 		// L2 falls inside fn_main — should auto-resolve and apply the edit.
 		let result = apply_edits(&state, &EditParams {
 			operations:       vec![EditOperation {
-				op:      ChunkEditOp::Replace,
+				op:      ChunkEditOp::Put,
 				sel:     Some(format!("L2#{}", chunk.checksum)),
 				crc:     None,
 				region:  None,
@@ -2408,7 +2632,7 @@ mod tests {
 		// L999 is way beyond the file — should fail.
 		let result = apply_edits(&state, &EditParams {
 			operations:       vec![EditOperation {
-				op:      ChunkEditOp::Replace,
+				op:      ChunkEditOp::Put,
 				sel:     Some("L999".to_owned()),
 				crc:     None,
 				region:  None,
@@ -2439,7 +2663,7 @@ mod tests {
 
 		let result = apply_edits(&state, &EditParams {
 			operations:       vec![EditOperation {
-				op:      ChunkEditOp::Replace,
+				op:      ChunkEditOp::Put,
 				sel:     Some("sect_Top.sect_Buildi".to_owned()),
 				crc:     Some(chunk.checksum.clone()),
 				region:  None,
@@ -2627,14 +2851,14 @@ mod tests {
 	}
 
 	#[test]
-	fn focus_emits_only_touched_and_siblings() {
+	fn focus_emits_only_changed_chain() {
 		let source = "const a = 1;\n\nconst b = 2;\n\nconst c = 3;\n\nconst d = 4;\n\nconst e = 5;\n";
 		let state = state_for(source, "typescript");
 		let chunk = state.inner().chunk("var_c").expect("var_c");
 
 		let result = apply_edits(&state, &EditParams {
 			operations:       vec![EditOperation {
-				op:      ChunkEditOp::Replace,
+				op:      ChunkEditOp::Put,
 				sel:     Some("var_c".to_owned()),
 				crc:     Some(chunk.checksum.clone()),
 				region:  None,
@@ -2650,12 +2874,22 @@ mod tests {
 		})
 		.expect("edit should apply");
 
-		// Touched chunk and immediate siblings should appear; distant chunks should
-		// not contribute their bodies.
+		// The focused edit view should show only the changed chunk chain, not
+		// sibling context blocks.
 		let response = &result.response_text;
-		assert!(response.contains("var_b"), "prev sibling should appear: {response}");
 		assert!(response.contains("var_c"), "touched chunk should appear: {response}");
-		assert!(response.contains("var_d"), "next sibling should appear: {response}");
+		assert!(
+			response.contains("*@var_c#"),
+			"changed chunk should be marked in the gutter: {response}"
+		);
+		assert!(
+			!response.contains("var_b"),
+			"prev sibling should not appear in the focused edit view: {response}"
+		);
+		assert!(
+			!response.contains("var_d"),
+			"next sibling should not appear in the focused edit view: {response}"
+		);
 		assert!(
 			!response.contains("const a"),
 			"distant chunk var_a body should not appear: {response}"
@@ -2692,7 +2926,7 @@ mod tests {
 
 		let Err(err) = apply_edits(&state, &EditParams {
 			operations:       vec![EditOperation {
-				op:      ChunkEditOp::Replace,
+				op:      ChunkEditOp::Put,
 				sel:     Some("fn_alpha".to_owned()),
 				crc:     Some(alpha.checksum.clone()),
 				region:  Some(ChunkRegion::Body),
@@ -2776,7 +3010,7 @@ mod tests {
 		let chunk = state.inner().chunk("fn_main").expect("fn_main");
 
 		let result = apply_single_edit(&state, "test.ts", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(format!("fn_main#{}~", chunk.checksum)),
 			crc:     None,
 			region:  None,
@@ -2794,7 +3028,7 @@ mod tests {
 		let chunk = state.inner().chunk("fn_main").expect("fn_main");
 
 		let result = apply_single_edit(&state, "test.rs", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(format!("fn_main#{}~", chunk.checksum)),
 			crc:     None,
 			region:  None,
@@ -2812,7 +3046,7 @@ mod tests {
 		let chunk = state.inner().chunk("fn_main").expect("fn_main");
 
 		let result = apply_single_edit(&state, "test.go", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(format!("fn_main#{}~", chunk.checksum)),
 			crc:     None,
 			region:  None,
@@ -2830,7 +3064,7 @@ mod tests {
 		let chunk = state.inner().chunk("fn_run").expect("fn_run");
 
 		let result = apply_single_edit(&state, "test.py", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(format!("fn_run#{}~", chunk.checksum)),
 			crc:     None,
 			region:  None,
@@ -3035,7 +3269,7 @@ mod tests {
 
 		let result = apply_edits(&state, &EditParams {
 			operations:       vec![EditOperation {
-				op:      ChunkEditOp::Replace,
+				op:      ChunkEditOp::Put,
 				sel:     Some("class_Foo.fn_bar#ZZZZ".to_owned()),
 				crc:     None,
 				region:  None,
@@ -3063,7 +3297,7 @@ mod tests {
 		let chunk = state.inner().chunk("fn_main").expect("fn_main");
 
 		let result = apply_single_edit(&state, "test.rs", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(format!("fn_main#{}^", chunk.checksum)),
 			crc:     None,
 			region:  None,
@@ -3168,7 +3402,7 @@ mod tests {
 			.expect("fn_start");
 
 		let result = apply_single_edit(&state, "test.ts", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(format!("class_Server.fn_start#{}~", chunk.checksum)),
 			crc:     None,
 			region:  None,
@@ -3193,7 +3427,7 @@ mod tests {
 			.expect("fn_start");
 
 		let result = apply_single_edit(&state, "test.ts", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(format!("class_Server.fn_start#{}~", chunk.checksum)),
 			crc:     None,
 			region:  None,
@@ -3219,7 +3453,7 @@ mod tests {
 			.expect("fn_start");
 
 		let result = apply_single_edit(&state, "test.ts", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(format!("class_Server.fn_start#{}~", chunk.checksum)),
 			crc:     None,
 			region:  None,
@@ -3312,7 +3546,7 @@ mod tests {
 			.expect("list chunk");
 
 		let result = apply_single_edit(&state, "test.md", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(format!("{}#{}", list.path, list.checksum)),
 			crc:     None,
 			region:  None,
@@ -3444,7 +3678,7 @@ mod tests {
 			let sel = format!("enum_LogLev.vrnt_Info#{}{}", chunk.checksum, region_suffix);
 			let result = apply_edits(&state, &EditParams {
 				operations:       vec![EditOperation {
-					op:      ChunkEditOp::Replace,
+					op:      ChunkEditOp::Put,
 					sel:     Some(sel),
 					crc:     None,
 					region:  None,
@@ -3509,14 +3743,12 @@ mod tests {
 		);
 
 		let result = apply_single_edit(&state, "test.rs", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(format!("impl_Server.fn_start#{}^", chunk.checksum)),
 			crc:     None,
 			region:  None,
 			content: Some(
-				"    /// Initializes and starts the server.
-    pub fn start(&mut self) {"
-					.to_owned(),
+				"    /// Initializes and starts the server.\n    pub fn start(&mut self) {".to_owned(),
 			),
 			find:    None,
 		});
@@ -3570,15 +3802,11 @@ mod tests {
 		assert!(chunk.prologue_end_byte.is_some(), "fn_start should have prologue_end_byte");
 
 		let result = apply_single_edit(&state, "test.ts", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(format!("class_Server.fn_start#{}^", chunk.checksum)),
 			crc:     None,
 			region:  None,
-			content: Some(
-				"    /** Initializes the server. */
-    start() {"
-					.to_owned(),
-			),
+			content: Some("    /** Initializes the server. */\n    start() {".to_owned()),
 			find:    None,
 		});
 
@@ -3605,7 +3833,7 @@ mod tests {
 		let chunk = state.inner().chunk("fn_main").expect("fn_main");
 
 		let result = apply_single_edit(&state, "test.py", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(format!("fn_main#{}~", chunk.checksum)),
 			crc:     None,
 			region:  None,
@@ -3656,7 +3884,7 @@ mod tests {
 			.expect("fn_start");
 
 		let result = apply_single_edit(&state, "test.py", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(format!("class_Server.fn_start#{}^", chunk.checksum)),
 			crc:     None,
 			region:  None,
@@ -3716,7 +3944,7 @@ mod tests {
 		let chunk = state.inner().chunk("class_Server").expect("class_Server");
 
 		let result = apply_single_edit(&state, "test.py", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(format!("class_Server#{}~", chunk.checksum)),
 			crc:     None,
 			region:  None,
@@ -3765,7 +3993,7 @@ mod tests {
 
 		// Replace the function WITHOUT including #[test] in the content.
 		let result = apply_single_edit(&state, "test.rs", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some("mod_tests.fn_my_tes".to_owned()),
 			crc:     Some(chunk.checksum.clone()),
 			region:  None,
@@ -3826,7 +4054,7 @@ mod tests {
 		let result = apply_edits(&state, &EditParams {
 			operations:       vec![
 				EditOperation {
-					op:      ChunkEditOp::Replace,
+					op:      ChunkEditOp::Put,
 					sel:     Some("mod_tests.fn_test_a".to_owned()),
 					crc:     Some(chunk_a.checksum.clone()),
 					region:  None,
@@ -3834,7 +4062,7 @@ mod tests {
 					find:    None,
 				},
 				EditOperation {
-					op:      ChunkEditOp::Replace,
+					op:      ChunkEditOp::Put,
 					sel:     Some("mod_tests.fn_test_b".to_owned()),
 					crc:     Some(chunk_b.checksum.clone()),
 					region:  None,
@@ -3908,7 +4136,7 @@ mod tests {
 		let result = apply_edits(&state, &EditParams {
 			operations:       vec![
 				EditOperation {
-					op:      ChunkEditOp::Replace,
+					op:      ChunkEditOp::Put,
 					sel:     Some("mod_tests.fn_test_a".to_owned()),
 					crc:     Some(chunk_a.checksum.clone()),
 					region:  None,
@@ -3923,7 +4151,7 @@ mod tests {
 					find:    None,
 				},
 				EditOperation {
-					op:      ChunkEditOp::Replace,
+					op:      ChunkEditOp::Put,
 					sel:     Some("mod_tests.fn_test_b".to_owned()),
 					crc:     Some(chunk_b.checksum.clone()),
 					region:  None,
@@ -4073,7 +4301,7 @@ function foo() {\n<<<<<<< HEAD\n\treturn bar();\n=======\n\treturn baz();\n>>>>>
 			.clone();
 
 		let result = apply_single_edit(&state, "test.ts", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(conflict.path.clone()),
 			crc:     Some(conflict.checksum),
 			region:  None,
@@ -4111,7 +4339,7 @@ function foo() {\n<<<<<<< HEAD\n\treturn bar();\n=======\n\treturn baz();\n>>>>>
 		let result = apply_edits(&state, &EditParams {
 			operations:       vec![
 				EditOperation {
-					op:      ChunkEditOp::Replace,
+					op:      ChunkEditOp::Put,
 					sel:     Some(ours.path.clone()),
 					crc:     Some(ours.checksum),
 					region:  None,
@@ -4202,7 +4430,7 @@ function foo() {\n<<<<<<< HEAD\n\treturn bar();\n=======\n\treturn baz();\n>>>>>
 			.expect("impl_Server.fn_addres should exist");
 
 		let result = apply_single_edit(&state, "test.rs", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(format!("impl_Server.fn_addres#{}^", chunk.checksum)),
 			crc:     None,
 			region:  None,
@@ -4312,7 +4540,7 @@ function foo() {\n<<<<<<< HEAD\n\treturn bar();\n=======\n\treturn baz();\n>>>>>
 			.find(|c| c.identifier.as_deref() == Some("is_running") || c.path.contains("is_run"))
 			.expect("is_running chunk");
 		let result = apply_single_edit(&state, "test.rs", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some(chunk.path.clone()),
 			crc:     Some(chunk.checksum.clone()),
 			region:  Some(ChunkRegion::Body),
@@ -4333,7 +4561,7 @@ function foo() {\n<<<<<<< HEAD\n\treturn bar();\n=======\n\treturn baz();\n>>>>>
 		let state = state_for(source, "rust");
 		let chunk = state.inner().chunk("fn_foo").expect("fn_foo");
 		let result = apply_single_edit(&state, "test.rs", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some("fn_foo".to_owned()),
 			crc:     Some(chunk.checksum.clone()),
 			region:  Some(ChunkRegion::Body),
@@ -4433,7 +4661,7 @@ function foo() {\n<<<<<<< HEAD\n\treturn bar();\n=======\n\treturn baz();\n>>>>>
 
 		let result = apply_edits(&state, &EditParams {
 			operations:       vec![EditOperation {
-				op:      ChunkEditOp::Replace,
+				op:      ChunkEditOp::Put,
 				sel:     Some(format!("{}~", if_chunk.path)),
 				crc:     Some(if_chunk.checksum.clone()),
 				region:  None,
@@ -4478,7 +4706,7 @@ function foo() {\n<<<<<<< HEAD\n\treturn bar();\n=======\n\treturn baz();\n>>>>>
 
 		let result = apply_edits(&state, &EditParams {
 			operations:       vec![EditOperation {
-				op:      ChunkEditOp::Replace,
+				op:      ChunkEditOp::Put,
 				sel:     Some(format!("{}~", if_chunk.path)),
 				crc:     Some(if_chunk.checksum.clone()),
 				region:  None,
@@ -4518,7 +4746,7 @@ function foo() {\n<<<<<<< HEAD\n\treturn bar();\n=======\n\treturn baz();\n>>>>>
 		let state = state_for(source, "rust");
 		let foo = state.inner().chunk("fn_foo").expect("fn_foo");
 		let result = apply_single_edit(&state, "test.rs", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some("fn_foo".to_owned()),
 			crc:     Some(foo.checksum.clone()),
 			region:  None,
@@ -4545,7 +4773,7 @@ function foo() {\n<<<<<<< HEAD\n\treturn bar();\n=======\n\treturn baz();\n>>>>>
 			.chunk("enum_Level.vrnt_Debug")
 			.expect("vrnt_Debug");
 		let result = apply_single_edit(&state, "test.rs", EditOperation {
-			op:      ChunkEditOp::Replace,
+			op:      ChunkEditOp::Put,
 			sel:     Some("enum_Level.vrnt_Debug".to_owned()),
 			crc:     Some(debug.checksum.clone()),
 			region:  None,
@@ -4558,6 +4786,11 @@ function foo() {\n<<<<<<< HEAD\n\treturn bar();\n=======\n\treturn baz();\n>>>>>
 		assert!(
 			result.response_text.contains("Debug"),
 			"deletion of first enum variant should show a diff with the removed content: {}",
+			result.response_text
+		);
+		assert!(
+			result.response_text.contains("@enum_Level.vrnt_Debug#"),
+			"deleted variant should keep its chunk anchor with a deletion marker: {}",
 			result.response_text
 		);
 	}

@@ -2,18 +2,73 @@
 
 ## [Unreleased]
 
+## [14.1.1] - 2026-04-14
+
+### Breaking Changes
+
+- Removed the standalone `vim` tool from built-in tool lists, so vim-style editing is now invoked through `edit` in `vim` mode
+- Removed the `searchDb` field from session and extension tool contexts, so custom tools and extensions no longer receive a shared native search DB handle from `ToolSession`, `CustomToolContext`, `ExtensionContext`, and `CreateAgentSessionOptions`
+- Changed the `vim` tool API to require either `open: "path"` or `kbd: [...]` per call and removed direct `line`/`col` cursor parameters from `open`, so callers must position the cursor via key sequences after opening
+- Changed the `edit` schemas for patch, replace, hashline, and chunk modes from top-level request fields to `edits` array entries, requiring path/mode details on each edit and breaking callers that send legacy top-level `path`, `old_text`, `new_text`, `op`, `move`, or `delete` payloads
+
 ### Added
 
+- Added Vim ex aliases `:del`, `:ya`, `:co`, and `:mo` as shorthand for existing delete, yank, copy, and move commands
+- Added support for additional Vim ex command aliases `:write`/`write!`, `:edit`/`edit!`, and `:update`/`:up` in command parsing
+- Added support for vim `:global` and `:vglobal`/`/` variants as `:g/pattern/d` and `:v/pattern/d` parsing and execution
+- Added support for extra Vim operations by treating `x`, `X`, `s`, `S`, `C`, and `D` as delete/change operator aliases
+- Added support for new Vim motions `gE`/`ge`, `g_`, `g*`, `g#`, and `|`
+- Added support for `C-f` and `C-b` page motions in vim mode
+- Added `C-u` and `C-o` in vim insert mode to clear to line start and execute a one-off normal-mode command before returning to insert
+- Added insert-mode visual operators `J`, `u`, `U`, `p`, and `P` to join lines, convert case, and replace the selected region with register content
+- Added normal-mode line motions `+`, `-`, and `_` to move to line offsets at the first non-blank character
+- Added `*` and `#` normal-mode commands to search forward or backward for the word under the cursor
+- Added `gJ` to join a line range, `gv` to restore the last visual selection, and `ZZ`/`ZQ` shortcuts for save-and-exit or exit-without-save in vim mode
+- Added paragraph text object `p` for `ip`/`ap`-style paragraph selection
+- Added support for Vim ex line-address forms like `.`, `$`, `+N`/`-N`, destination addresses such as `:t$`, and ranged `:global` commands
+- Added Vim ex `:join`/`:j` and `:join!`/`:j!` support to join addressed lines with or without whitespace normalization
+- Added a warning when chunk edits write to the `~` selector with body lines that appear over-indented, instructing users to start top-level body text at column 0
+- Added validation feedback for suspect indentation in chunk-mode `~` body writes so users can align content with the tool's automatic base indentation
+- Added support for multi-file `edit` calls across replace, patch, hashline, and chunk modes by grouping `edits` entries by file path and returning combined per-file results
+- Added per-edit `path` support in chunk entries so each operation can target explicit files when submitting mixed edits in a single request
 - Added support for `computeHashlineDiff` to accept hashline edits with `loc` and `content` payloads without requiring pre-resolved `op` fields
 - Added `/rename <title>` slash command to set an explicit session name, updating the session header and terminal tab title ([#658](https://github.com/can1357/oh-my-pi/issues/658))
 - Added `session_name` status line segment: displays the session name in the status bar right side with a stable hash-derived accent color unique to each name; shown in all presets when a name is set
 
 ### Changed
 
+- Changed vim path normalization to accept colon-prefixed `path` values instead of rejecting them as Vim commands
+- Changed default `providers.openaiWebsockets` setting to `off` when unset, so OpenAI websocket transport is now disabled unless explicitly enabled
+- Changed Vim ex `:update`/`:up` execution to skip writing unchanged buffers and report buffer unchanged status
+- Changed Vim page-scroll commands `C-f`, `C-b`, `C-u`, and `C-d` to move in viewport-height based increments instead of fixed constants
+- Changed `z` command behavior so `zt`, `zb`, and `z.` now align cursor movement to first non-blank in the line
+- Changed `:g`/`:v` global command handling to process matching lines safely by working in reverse order and preserving file structure
+- Changed vim tab breadcrumb rendering from ` → ` to `→` in the editor view
+- Changed custom tool and task execution contexts to no longer expose a shared `searchDb` accessor, removing direct access to native grep/glob/fuzzyFind search backends from extension callbacks
+- Changed the `task` tool `schema` field to require JSON-encoded JTD schema text instead of a schema object, matching prompt guidance and task-subagent invocation
+- Changed chunk edit payloads to encode selectors as `path: "file:selector"` and updated chunk tool guidance and examples to match
+- Updated `edit` call/result rendering to show per-file diff sections and append a `(+N more)` hint when edits target multiple files
+- Grouped chunk-mode `grep` results by directory, file, and chunk so directory searches now render as hierarchical sections (`#`/`##`) with per-chunk anchor lines
+- Updated chunk-mode `grep` output to include match lines under their containing chunk entries with consistent line-number alignment based on file length
 - Changed eager todo enforcement to only apply on the first user message of a conversation, skipping subsequent user turns that may correct, clarify, or redirect the prior task
+
+### Removed
+
+- Removed live in-progress Vim tool previews during streaming call execution, so the TUI now shows only the last completed file viewport until the call finishes
 
 ### Fixed
 
+- Fixed vim-mode multi-step line edits by auto-reordering ascending line-positioned commands to descending order before execution
+- Fixed Vim viewport rendering to display the inline highlighted cursor character and keep long cursor lines centered around the cursor in tool previews
+- Fixed Vim `:global` command defaults to handle only supported subcommands and report unsupported ones explicitly
+- Fixed Vim ex execution so parsed `:update`, `:yank`, and `:put` commands now run instead of falling through
+- Fixed vim tool rendering so streamed calls preview the live target viewport and large insert payloads update incrementally instead of popping in all at once
+- Fixed session event delivery so streaming `message_update`/tool-call previews reach the TUI immediately instead of waiting for extension handlers to finish
+- Fixed HTML session export rendering so background-job wait calls render as `poll` instead of stale `await`, while still recognizing legacy exported sessions
+- Fixed OpenRouter model resolution to accept dated routed selectors such as `openrouter/z-ai/glm-4.7-20251222:nitro`, inheriting metadata from the base catalog model when the exact variant is not listed yet
+- Fixed pre-execution edit preview routing so replace/patch/hashline mode diffs are computed from the new structured edit entries
+- Adjusted chunk/hashline/prompt guidance and validation to align with the refactored per-entry schema
+- Fixed chunk streaming output detection to verify chunk edits with `chunkToolEditSchema`, preventing non-chunk edit payloads from being rendered as chunk diffs
 - Fixed tool execution output to return the original `toolResult` text content from tools instead of sanitizing it before sending completion messages
 - Fixed session accent rendering in the status line and editor to reset only foreground color (`\x1b[39m`) so applying a session color no longer clears other ANSI styles
 - Session name sanitization: strip C0/C1 control characters (including ANSI ESC) from session names at storage time and in status line rendering, preventing escape sequence injection into TUI output

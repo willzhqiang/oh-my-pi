@@ -31,7 +31,9 @@ import type { EditToolDetails, LspBatchRequest } from "../renderer";
 export type { ChunkReadTarget };
 
 export type ChunkEditOperation =
-	| { op: "replace"; sel?: string; content: string }
+	| { op: "put"; sel?: string; content: string }
+	| { op: "replace"; sel?: string; content: string; find: string }
+	| { op: "delete"; sel?: string }
 	| { op: "before"; sel?: string; content: string }
 	| { op: "after"; sel?: string; content: string }
 	| { op: "prepend"; sel?: string; content: string }
@@ -197,6 +199,17 @@ export function parseChunkSelector(selector: string | undefined): { selector?: s
 	return { selector };
 }
 
+/** Split a combined `file:selector` path into file path and chunk selector. */
+export function parseChunkEditPath(editPath: string | undefined): { filePath: string; selector?: string } {
+	if (!editPath) return { filePath: "" };
+	const colonIndex = chunkReadPathSeparatorIndex(editPath);
+	if (colonIndex === -1) {
+		return { filePath: editPath };
+	}
+	const sel = editPath.slice(colonIndex + 1) || undefined;
+	return { filePath: editPath.slice(0, colonIndex), selector: sel };
+}
+
 export function parseChunkReadPath(readPath: string): ParsedChunkReadPath {
 	const colonIndex = chunkReadPathSeparatorIndex(readPath);
 	if (colonIndex === -1) {
@@ -257,16 +270,34 @@ export async function formatChunkedRead(params: {
 	return { text: result.text, resolvedPath: filePath, chunk: result.chunk };
 }
 
-export async function formatChunkedGrepLine(params: {
+export type ChunkedGrepMatch = {
+	displayPath: string;
+	fileLineCount: number;
+	chunkPath?: string;
+	chunkChecksum?: string;
+	lineNumber: number;
+	line: string;
+};
+
+export async function describeChunkedGrepMatch(params: {
 	filePath: string;
 	lineNumber: number;
 	line: string;
 	cwd: string;
 	language?: string;
-}): Promise<string> {
+}): Promise<ChunkedGrepMatch> {
 	const { filePath, lineNumber, line, cwd, language } = params;
 	const { state } = await loadChunkStateForFile(filePath, language);
-	return state.formatGrepLine(displayPathForFile(filePath, cwd), lineNumber, line);
+	const chunkPath = state.lineToContainingChunkPath(lineNumber) || undefined;
+	const chunkInfo = chunkPath ? state.chunk(chunkPath) : null;
+	return {
+		displayPath: displayPathForFile(filePath, cwd),
+		fileLineCount: state.lineCount,
+		chunkPath,
+		chunkChecksum: chunkInfo?.checksum,
+		lineNumber,
+		line,
+	};
 }
 
 const CHUNK_CHECKSUM_ALPHABET = "ZPMQVRWSNKTXJBYH";
@@ -337,12 +368,21 @@ function toNativeEditOperation(
 	const { selector, crc, region } = parseChunkEditSelector(operation.sel);
 	const nativeRegion = toNativeEditRegion(operation.sel === undefined ? (region ?? defaultRegion) : region, encoding);
 	switch (operation.op) {
+		case "put":
+			return {
+				op: ChunkEditOp.Put,
+				sel: selector,
+				crc,
+				region: nativeRegion,
+				content: operation.content,
+			};
 		case "replace":
 			return {
 				op: ChunkEditOp.Replace,
 				sel: selector,
 				crc,
 				region: nativeRegion,
+				find: operation.find,
 				content: operation.content,
 			};
 		case "before":
@@ -353,6 +393,8 @@ function toNativeEditOperation(
 			return { op: ChunkEditOp.Prepend, sel: selector, crc, region: nativeRegion, content: operation.content };
 		case "append":
 			return { op: ChunkEditOp.Append, sel: selector, crc, region: nativeRegion, content: operation.content };
+		case "delete":
+			return { op: ChunkEditOp.Delete, sel: selector, crc, region: nativeRegion };
 		default: {
 			const exhaustive: never = operation;
 			return exhaustive;
@@ -442,22 +484,39 @@ export function missingChunkReadTarget(selector: string): ChunkReadTarget {
 	return { status: ChunkReadStatus.NotFound, selector };
 }
 
-const CHUNK_OP_VALUES = ["replace", "after", "before", "prepend", "append"] as const;
-
-export const chunkToolEditSchema = Type.Object({
-	op: StringEnum(CHUNK_OP_VALUES),
-	sel: Type.String({
-		description:
-			"Chunk selector. Use 'path~' or 'path^' for insertions, 'path#CRC~' or 'path#CRC^' for replace, or omit the suffix to target the full chunk.",
-	}),
-	content: Type.String({
-		description:
-			"New content. Write indentation relative to the targeted region as described in the tool prompt. Do NOT include the chunk's base padding.",
-	}),
-});
+export const chunkToolEditSchema = Type.Object(
+	{
+		path: Type.String({
+			description: "File path with chunk selector. Examples: 'src/app.ts:fn_foo#ABCD~', 'src/app.ts:class_Bar'.",
+		}),
+		write: Type.Optional(
+			Type.Union([Type.String(), Type.Null()], {
+				description: "Write complete new content to the targeted region. Use null to delete the chunk.",
+			}),
+		),
+		replace: Type.Optional(
+			Type.Object(
+				{
+					old: Type.String({ description: "Literal substring to find. Must match exactly once." }),
+					new: Type.String({ description: "Replacement text." }),
+				},
+				{ description: "Find and replace a substring within the chunk." },
+			),
+		),
+		insert: Type.Optional(
+			Type.Object(
+				{
+					loc: StringEnum(["append", "prepend"] as const),
+					body: Type.String({ description: "Content to insert." }),
+				},
+				{ description: "Insert content relative to the chunk." },
+			),
+		),
+	},
+	{ additionalProperties: false },
+);
 export const chunkEditParamsSchema = Type.Object(
 	{
-		path: Type.String({ description: "File path" }),
 		edits: Type.Array(chunkToolEditSchema, {
 			description: "Chunk edits",
 			minItems: 1,
@@ -469,9 +528,10 @@ export const chunkEditParamsSchema = Type.Object(
 export type ChunkToolEdit = Static<typeof chunkToolEditSchema>;
 export type ChunkParams = Static<typeof chunkEditParamsSchema>;
 
-interface ExecuteChunkModeOptions {
+export interface ExecuteChunkSingleOptions {
 	session: ToolSession;
-	params: ChunkParams;
+	path: string;
+	edits: ChunkToolEdit[];
 	signal?: AbortSignal;
 	batchRequest?: LspBatchRequest;
 	writethrough: WritethroughCallback;
@@ -479,20 +539,122 @@ interface ExecuteChunkModeOptions {
 }
 
 export function isChunkParams(params: unknown): params is ChunkParams {
-	return (
-		typeof params === "object" &&
-		params !== null &&
-		"edits" in params &&
-		Array.isArray(params.edits) &&
-		params.edits.length > 0 &&
-		typeof params.edits[0] === "object" &&
-		params.edits[0] !== null &&
-		"sel" in params.edits[0]
-	);
+	if (
+		typeof params !== "object" ||
+		params === null ||
+		!("edits" in params) ||
+		!Array.isArray(params.edits) ||
+		params.edits.length === 0
+	) {
+		return false;
+	}
+	const first = params.edits[0];
+	if (typeof first !== "object" || first === null || !("path" in first)) return false;
+	return "write" in first || "replace" in first || "insert" in first;
 }
 
-function normalizeChunkEditOperations(edits: ChunkToolEdit[]): ChunkEditOperation[] {
-	return edits as ChunkEditOperation[];
+/** Auto-correct indentation for content targeting a body region (`~`) when autoIndent is on.
+ *  Handles two patterns:
+ *  1. Tab-based over-indentation: models include the function's base \t indent.
+ *  2. Space-based indentation: models use literal spaces instead of \t.
+ *  Returns the corrected content and any warnings. */
+function autoCorrectBodyIndent(content: string, index: number): { content: string; warnings: string[] } {
+	const warnings: string[] = [];
+	if (!content || !resolveChunkAutoIndent()) return { content, warnings };
+	const lines = content.split("\n");
+	const nonEmpty = lines.filter(l => l.length > 0);
+	if (nonEmpty.length <= 1) return { content, warnings };
+
+	// 1. Tab-based over-indentation: strip common leading tabs.
+	const minTabs = Math.min(...nonEmpty.map(l => l.match(/^\t*/)?.[0].length ?? 0));
+	if (minTabs >= 1) {
+		const fixed = lines.map(l => (l.length === 0 ? l : l.slice(minTabs))).join("\n");
+		warnings.push(
+			`Edit ${index + 1}: auto-corrected body indentation \u2014 stripped ${minTabs} leading tab(s). When writing to \`~\`, write at column 0; the tool adds the function's base indent.`,
+		);
+		return { content: fixed, warnings };
+	}
+
+	// 2. Space-based indentation: strip common leading spaces and convert to tabs.
+	const spaceIndents = nonEmpty.map(l => l.match(/^ */)?.[0].length ?? 0);
+	const minSpaces = Math.min(...spaceIndents);
+	if (minSpaces >= 2) {
+		const indentDiffs = spaceIndents.map(s => s - minSpaces).filter(d => d > 0);
+		const indentUnit = indentDiffs.length > 0 ? Math.min(...indentDiffs) : 4;
+		const unit = indentUnit >= 2 && indentUnit <= 8 ? indentUnit : 4;
+		const fixed = lines
+			.map(line => {
+				if (line.length === 0) return line;
+				const stripped = line.slice(minSpaces);
+				const leadingSpaces = stripped.match(/^ */)?.[0].length ?? 0;
+				const tabs = Math.floor(leadingSpaces / unit);
+				const rem = leadingSpaces % unit;
+				return "\t".repeat(tabs) + " ".repeat(rem) + stripped.slice(leadingSpaces);
+			})
+			.join("\n");
+		warnings.push(
+			`Edit ${index + 1}: auto-converted space indentation to tabs \u2014 stripped ${minSpaces} common leading spaces and converted ${unit}-space indent to tabs. When auto-indent is on, use \\t for indentation.`,
+		);
+		return { content: fixed, warnings };
+	}
+
+	return { content, warnings };
+}
+
+function normalizeChunkEditOperations(edits: ChunkToolEdit[]): {
+	operations: ChunkEditOperation[];
+	warnings: string[];
+} {
+	const warnings: string[] = [];
+	const operations = edits.map((edit, index): ChunkEditOperation => {
+		const { selector } = parseChunkEditPath(edit.path);
+		// When multiple ops are present (model confusion), prefer write (total replacement) as the
+		// safest default, then replace (surgical), then insert (additive), then delete.
+		const hasInsert = edit.insert != null && typeof edit.insert.body === "string" && edit.insert.body.length > 0;
+		const hasReplace =
+			edit.replace != null &&
+			((typeof edit.replace.old === "string" && edit.replace.old.length > 0) ||
+				(typeof edit.replace.new === "string" && edit.replace.new.length > 0));
+		const hasWrite = typeof edit.write === "string" && edit.write.length > 0;
+		const opCount = [hasInsert, hasReplace, hasWrite].filter(Boolean).length;
+		if (opCount > 1) {
+			const chosen = hasWrite ? "write" : hasReplace ? "replace" : "insert";
+			const present = [hasWrite && "write", hasReplace && "replace", hasInsert && "insert"]
+				.filter(Boolean)
+				.join(", ");
+			warnings.push(
+				`Edit ${index + 1}: multiple operation fields set (${present}). Each edit entry must have exactly ONE of write/replace/insert — not multiple. Used "${chosen}", ignored the rest.`,
+			);
+		}
+		if (hasWrite) {
+			let writeContent = edit.write!;
+			if (selector?.endsWith("~")) {
+				const corrected = autoCorrectBodyIndent(writeContent, index);
+				writeContent = corrected.content;
+				warnings.push(...corrected.warnings);
+			}
+			return { op: "put", sel: selector, content: writeContent };
+		}
+		if (typeof edit.write === "string" && !hasInsert && !hasReplace) {
+			return { op: "put", sel: selector, content: edit.write };
+		}
+		if (hasReplace) {
+			return { op: "replace", sel: selector, content: edit.replace!.new, find: edit.replace!.old };
+		}
+		if (hasInsert) {
+			const op = edit.insert!.loc === "prepend" ? "before" : "after";
+			let insertContent = edit.insert!.body;
+			if (selector?.endsWith("~")) {
+				const corrected = autoCorrectBodyIndent(insertContent, index);
+				insertContent = corrected.content;
+				warnings.push(...corrected.warnings);
+			}
+			return { op, sel: selector, content: insertContent };
+		}
+		// write: null or no op specified → delete
+		return { op: "delete", sel: selector };
+	});
+	return { operations, warnings };
 }
 
 async function writeChunkResult(params: {
@@ -544,11 +706,10 @@ async function writeChunkResult(params: {
 	};
 }
 
-export async function executeChunkMode(
-	options: ExecuteChunkModeOptions,
+export async function executeChunkSingle(
+	options: ExecuteChunkSingleOptions,
 ): Promise<AgentToolResult<EditToolDetails, typeof chunkEditParamsSchema>> {
-	const { session, params, signal, batchRequest, writethrough, beginDeferredDiagnosticsForPath } = options;
-	const { path, edits } = params;
+	const { session, path, edits, signal, batchRequest, writethrough, beginDeferredDiagnosticsForPath } = options;
 	const { resolvedPath, sourceFile, sourceExists, rawContent, chunkLanguage } = await resolveChunkSourceContext(
 		session,
 		path,
@@ -557,7 +718,7 @@ export async function executeChunkMode(
 	if (parentDir && parentDir !== ".") {
 		await fs.mkdir(parentDir, { recursive: true });
 	}
-	const normalizedOperations = normalizeChunkEditOperations(edits);
+	const { operations: normalizedOperations, warnings: normWarnings } = normalizeChunkEditOperations(edits);
 
 	if (!sourceExists && normalizedOperations.some(op => op.sel)) {
 		throw new Error(
@@ -573,10 +734,12 @@ export async function executeChunkMode(
 		operations: normalizedOperations,
 		anchorStyle: resolveAnchorStyle(session.settings),
 	});
+	chunkResult.warnings.push(...normWarnings);
 
 	if (!chunkResult.changed) {
+		const warningsBlock = chunkResult.warnings.length > 0 ? `\n\nWarnings:\n${chunkResult.warnings.join("\n")}` : "";
 		return {
-			content: [{ type: "text", text: "[No changes needed \u2014 content already matches.]" }],
+			content: [{ type: "text", text: `[No changes needed — content already matches.]${warningsBlock}` }],
 			details: {
 				diff: "",
 				op: sourceExists ? "update" : "create",

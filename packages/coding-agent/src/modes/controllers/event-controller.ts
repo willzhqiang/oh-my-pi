@@ -244,6 +244,7 @@ export class EventController {
 						tool,
 						this.ctx.ui,
 						this.ctx.sessionManager.getCwd(),
+						content.id,
 					);
 					component.setExpanded(this.ctx.toolOutputExpanded);
 					// When a tool fires during assistant streaming (typical for Cursor
@@ -345,6 +346,7 @@ export class EventController {
 				tool,
 				this.ctx.ui,
 				this.ctx.sessionManager.getCwd(),
+				event.toolCallId,
 			);
 			component.setExpanded(this.ctx.toolOutputExpanded);
 			if (this.ctx.streamingComponent) {
@@ -659,7 +661,8 @@ export class EventController {
 		if (this.ctx.isBackgrounded === false) return;
 		const notify = settings.get("completion.notify");
 		if (notify === "off") return;
-		const title = this.ctx.sessionManager.getSessionName();
+		const title =
+			this.ctx.sessionManager.titleSource === "auto" ? undefined : this.ctx.sessionManager.getSessionName();
 		const message = title ? `${title}: Complete` : "Complete";
 		TERMINAL.sendNotification(message);
 	}

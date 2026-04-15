@@ -11,7 +11,6 @@ import {
 	getOpenAICodexTransportDetails,
 	prewarmOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { SearchDb } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import {
 	$env,
@@ -19,7 +18,6 @@ import {
 	getAgentDbPath,
 	getAgentDir,
 	getProjectDir,
-	getSearchDbDir,
 	logger,
 	postmortem,
 	prompt,
@@ -149,8 +147,6 @@ export interface CreateAgentSessionOptions {
 	authStorage?: AuthStorage;
 	/** Model registry. Default: discoverModels(authStorage, agentDir) */
 	modelRegistry?: ModelRegistry;
-	/** Shared native search DB for grep/glob/fuzzyFind-backed workflows. */
-	searchDb?: SearchDb;
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model;
@@ -405,7 +401,6 @@ function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
 		sessionManager: ctx.sessionManager,
 		modelRegistry: ctx.modelRegistry,
 		model: ctx.model,
-		searchDb: ctx.searchDb,
 		isIdle: ctx.isIdle,
 		hasQueuedMessages: ctx.hasPendingMessages,
 		abort: ctx.abort,
@@ -897,13 +892,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const pythonKernelOwnerId = `agent-session:${Snowflake.next()}`;
 
 	try {
-		const searchDb = options.searchDb ?? new SearchDb(getSearchDbDir(agentDir));
+		const getActiveModelString = (): string | undefined => {
+			const activeModel = agent?.state.model;
+			if (activeModel) return formatModelString(activeModel);
+			if (model) return formatModelString(model);
+			return undefined;
+		};
 		const toolSession: ToolSession = {
 			cwd,
 			hasUI: options.hasUI ?? false,
 			enableLsp,
 			get hasEditTool() {
-				return !options.toolNames || options.toolNames.includes("edit");
+				const requestedToolNames = options.toolNames
+					? [...new Set(options.toolNames.map(name => name.toLowerCase()))]
+					: undefined;
+				return !requestedToolNames || requestedToolNames.includes("edit");
 			},
 			skipPythonPreflight: options.skipPythonPreflight,
 			forcePythonWarmup: options.forcePythonWarmup,
@@ -921,13 +924,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
 			getSessionSpawns: () => options.spawns ?? "*",
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
-			getActiveModelString: () => {
-				const activeModel = agent?.state.model;
-				if (activeModel) return formatModelString(activeModel);
-				// Fall back to initial model during tool creation (before agent exists)
-				if (model) return formatModelString(model);
-				return undefined;
-			},
+			getActiveModelString,
 			getPlanModeState: () => session.getPlanModeState(),
 			getCompactContext: () => session.formatCompactContext(),
 			getTodoPhases: () => session.getTodoPhases(),
@@ -966,7 +963,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			authStorage,
 			modelRegistry,
 			asyncJobManager,
-			searchDb,
 		};
 
 		// Initialize internal URL router for internal protocols (agent://, artifact://, memory://, skill://, rule://, mcp://, local://)
@@ -1231,7 +1227,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				sessionManager,
 				modelRegistry,
 				model: agent?.state.model,
-				searchDb,
 				isIdle: () => !session?.isStreaming,
 				hasQueuedMessages: () => (session?.queuedMessageCount ?? 0) > 0,
 				abort: () => session?.abort(),
@@ -1355,7 +1350,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		};
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
-		const requestedToolNames = options.toolNames?.map(name => name.toLowerCase()) ?? toolNamesFromRegistry;
+		const requestedToolNames =
+			(options.toolNames ? [...new Set(options.toolNames.map(name => name.toLowerCase()))] : undefined) ??
+			toolNamesFromRegistry;
 		const normalizedRequested = requestedToolNames.filter(name => toolRegistry.has(name));
 		const includeExitPlanMode = requestedToolNames.includes("exit_plan_mode");
 		const mcpDiscoveryEnabled = settings.get("mcp.discoveryMode") ?? false;
@@ -1482,7 +1479,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			.map(name => toolRegistry.get(name))
 			.filter((tool): tool is AgentTool => tool !== undefined);
 
-		const openaiWebsocketSetting = settings.get("providers.openaiWebsockets") ?? "auto";
+		const openaiWebsocketSetting = settings.get("providers.openaiWebsockets") ?? "off";
 		const preferOpenAICodexWebsockets =
 			openaiWebsocketSetting === "on" ? true : openaiWebsocketSetting === "off" ? false : undefined;
 		const serviceTierSetting = settings.get("serviceTier");
@@ -1584,7 +1581,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			ttsrManager,
 			obfuscator,
 			asyncJobManager,
-			searchDb,
 		});
 		hasSession = true;
 

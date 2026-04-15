@@ -43,7 +43,6 @@ function buildToolSession(
 		settings: options.settings,
 		authStorage: options.authStorage,
 		modelRegistry: options.modelRegistry,
-		searchDb: ctx.searchDb,
 	};
 }
 
@@ -79,7 +78,7 @@ export function createAnalyzeFileTool(options: {
 			});
 			const taskParams: TaskParams = {
 				agent: "quick_task",
-				schema: analyzeFileOutputSchema,
+				schema: JSON.stringify(analyzeFileOutputSchema),
 				tasks,
 			};
 			return taskTool.execute(toolCallId, taskParams, signal, onUpdate);

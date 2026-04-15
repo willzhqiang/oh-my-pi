@@ -347,6 +347,7 @@ export class InputController {
 								setSessionTerminalTitle(
 									this.ctx.sessionManager.getSessionName()!,
 									this.ctx.sessionManager.getCwd(),
+									this.ctx.sessionManager.titleSource,
 								);
 								this.ctx.updateEditorBorderColor();
 							}
@@ -563,7 +564,6 @@ export class InputController {
 		return createPromptActionAutocompleteProvider({
 			commands,
 			basePath,
-			searchDb: this.ctx.session.searchDb,
 			keybindings: this.ctx.keybindings,
 			copyCurrentLine: () => this.handleCopyCurrentLine(),
 			copyPrompt: () => this.handleCopyPrompt(),

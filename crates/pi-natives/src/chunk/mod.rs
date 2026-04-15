@@ -92,7 +92,7 @@ pub fn format_anchor(
 ) -> String {
 	style
 		.with_omit_checksum(omit_checksum.unwrap_or(false))
-		.render("", name.as_str(), checksum.as_str(), 0, 0)
+		.render("", name.as_str(), checksum.as_str())
 }
 
 // ── Core build logic ─────────────────────────────────────────────────────
@@ -370,7 +370,7 @@ fn build_chunk(
 		&& recurse.is_some()
 		&& recurse_parse_errors == 0
 		&& should_collapse_trivial_children(&candidate, &child_candidates);
-	let always_recurse = *ALWAYS_RECURSE && !candidate.groupable && !child_candidates.is_empty();
+	let always_recurse = !candidate.groupable && !child_candidates.is_empty();
 	// A child that already committed to splitting further (force_recurse +
 	// recurse) should always pull its parent along. Otherwise a small
 	// wrapper parent would keep the child's sub-structure hidden just
@@ -1396,6 +1396,45 @@ function main(): void {{
 			.expect("plain calls should be grouped into stmts");
 		assert!(stmts_chunk.group, "stmts should be a group");
 		assert!(stmts_chunk.leaf, "stmts with no callback should be a leaf");
+	}
+
+	#[test]
+	fn nested_call_with_callback_has_body_region() {
+		// Nested test()/it() calls inside describe() should be promoted with
+		// prologue/epilogue set so that `~` targets the callback body, not the
+		// entire chunk.
+		let source = "\
+describe(\"suite\", () => {
+\ttest(\"my test\", () => {
+\t\tconst x = 1;
+\t\tconst y = 2;
+\t\tconst z = 3;
+\t\texpect(x + y).toBe(z);
+\t});
+
+\ttest(\"other test\", () => {
+\t\tconst a = 10;
+\t\tconst b = 20;
+\t\tconst c = 30;
+\t\texpect(a + b).toBe(c);
+\t});
+});
+";
+		let tree = build_chunk_tree(source, "typescript").expect("tree should build");
+
+		let test_chunk = tree
+			.chunks
+			.iter()
+			.find(|c| c.path.starts_with("expr_descri.expr_test"))
+			.expect("test() should be a promoted named chunk under describe");
+		assert!(
+			test_chunk.prologue_end_byte.is_some(),
+			"test() chunk should have prologue_end_byte for ~ region support"
+		);
+		assert!(
+			test_chunk.epilogue_start_byte.is_some(),
+			"test() chunk should have epilogue_start_byte for ~ region support"
+		);
 	}
 
 	#[test]
@@ -3047,21 +3086,31 @@ end
 			})
 			.expect("render_read should succeed");
 
-		// The output should contain truncation markers indicating the chunk continues.
+		// The output should keep the chunk head and tail context and collapse the
+		// omitted middle ranges with generic expansion markers.
 		assert!(
-			result.text.contains("to expand above"),
-			"should show top truncation marker when chunk extends above visible range: {}",
+			result.text.contains("1^|function longFunc() {"),
+			"should keep the chunk signature when the visible range clips the head: {}",
 			result.text
 		);
 		assert!(
-			result.text.contains("to expand below"),
-			"should show bottom truncation marker when chunk extends below visible range: {}",
+			result.text.contains("9 |let h = 8;"),
+			"should keep tail context when the visible range clips the body: {}",
 			result.text
 		);
-		// The visible content should still be there.
 		assert!(
 			result.text.contains("let c = 3"),
 			"visible content should be rendered: {}",
+			result.text
+		);
+		assert!(
+			result.text.contains("[truncated… sel=L2-L2 to expand]"),
+			"should show a generic truncation marker above the requested lines: {}",
+			result.text
+		);
+		assert!(
+			result.text.contains("[truncated… sel=L8-L8 to expand]"),
+			"should show a generic truncation marker below the requested lines: {}",
 			result.text
 		);
 	}
@@ -3089,13 +3138,8 @@ end
 
 		// Should NOT have any truncation markers.
 		assert!(
-			!result.text.contains("to expand above"),
-			"no top clip marker when chunk fits: {}",
-			result.text
-		);
-		assert!(
-			!result.text.contains("to expand below"),
-			"no bottom clip marker when chunk fits: {}",
+			!result.text.contains("[truncated…"),
+			"no clip marker when chunk fits: {}",
 			result.text
 		);
 	}

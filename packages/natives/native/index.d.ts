@@ -137,23 +137,6 @@ export declare class PtySession {
   kill(): void
 }
 
-/**
- * Long-lived native search state: frecency persistence and per-workspace file
- * picker caches.
- */
-export declare class SearchDb {
-  /**
-   * Create search DB state rooted at `path` (trimmed). An empty path skips
-   * frecency storage.
-   */
-  constructor(path: string)
-  /**
-   * Root path string associated with this instance (same as passed to the
-   * constructor).
-   */
-  get path(): string
-}
-
 /** Persistent brush-core shell session. */
 export declare class Shell {
   /**
@@ -385,7 +368,9 @@ export declare enum ChunkAnchorStyle {
 
 /** Structural edit to apply relative to a chunk anchor. */
 export declare enum ChunkEditOp {
-  /** Replace the targeted region, or a substring via `find`. */
+  /** Put new content into the targeted region. */
+  Put = 'put',
+  /** Find and replace a literal substring within the targeted region. */
   Replace = 'replace',
   /** Remove the targeted region. */
   Delete = 'delete',
@@ -506,8 +491,8 @@ export interface EditOperation {
   /** Replacement or inserted text (meaning depends on `op`). */
   content?: string
   /**
-   * For scoped find/replace: literal substring to locate inside the target
-   * chunk. Must match exactly once. Pairs with `content` as the replacement.
+   * For `replace` op: literal substring to find inside the target chunk.
+   * Must match exactly once.
    */
   find?: string
 }
@@ -628,16 +613,8 @@ export interface FocusedPath {
  */
 export declare function formatAnchor(name: string, checksum: string, style: ChunkAnchorStyle, omitChecksum?: boolean | undefined | null): string
 
-/**
- * Fuzzy file path search for autocomplete.
- *
- * # Arguments
- * - `options`: Query string, root path, and limits.
- *
- * # Returns
- * Matching file and directory entries sorted by match quality.
- */
-export declare function fuzzyFind(options: FuzzyFindOptions, db?: SearchDb | undefined | null): Promise<FuzzyFindResult>
+/** Fuzzy file path search for autocomplete. */
+export declare function fuzzyFind(options: FuzzyFindOptions): Promise<FuzzyFindResult>
 
 /** A single match in fuzzy find results. */
 export interface FuzzyFindMatch {
@@ -702,7 +679,7 @@ export declare function getWorkProfile(lastSeconds: number): WorkProfile
  * directory, the glob pattern is invalid, or cancellation/timeout is
  * triggered.
  */
-export declare function glob(options: GlobOptions, onMatch?: ((error: Error | null, match: GlobMatch) => void) | undefined | null, db?: SearchDb | undefined | null): Promise<GlobResult>
+export declare function glob(options: GlobOptions, onMatch?: ((error: Error | null, match: GlobMatch) => void) | undefined | null): Promise<GlobResult>
 
 /** A single filesystem entry from a directory scan. */
 export interface GlobMatch {
@@ -769,7 +746,7 @@ export interface GlobResult {
  * # Returns
  * Aggregated results across matching files.
  */
-export declare function grep(options: GrepOptions, onMatch?: ((error: Error | null, match: GrepMatch) => void) | undefined | null, db?: SearchDb | undefined | null): Promise<GrepResult>
+export declare function grep(options: GrepOptions, onMatch?: ((error: Error | null, match: GrepMatch) => void) | undefined | null): Promise<GrepResult>
 
 /** A single match in a grep result. */
 export interface GrepMatch {
