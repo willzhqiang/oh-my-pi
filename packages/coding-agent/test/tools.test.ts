@@ -17,6 +17,7 @@ import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { PollTool } from "@oh-my-pi/pi-coding-agent/tools/poll-tool";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { ReadLinesTool } from "@oh-my-pi/pi-coding-agent/tools/read-lines";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import * as markitUtils from "@oh-my-pi/pi-coding-agent/utils/markit";
 import { $which, Snowflake } from "@oh-my-pi/pi-utils";
@@ -222,6 +223,7 @@ describe("Coding Agent Tools", () => {
 	let bashTool: BashTool;
 	let grepTool: GrepTool;
 	let findTool: FindTool;
+	let readLinesTool: ReadLinesTool;
 	let originalEditVariant: string | undefined;
 
 	beforeEach(() => {
@@ -241,6 +243,7 @@ describe("Coding Agent Tools", () => {
 		bashTool = wrapToolWithMetaNotice(new BashTool(session));
 		grepTool = wrapToolWithMetaNotice(new GrepTool(session));
 		findTool = wrapToolWithMetaNotice(new FindTool(session));
+		readLinesTool = wrapToolWithMetaNotice(new ReadLinesTool(session));
 	});
 
 	afterEach(() => {
@@ -1389,6 +1392,32 @@ function b() {
 				.filter(Boolean);
 
 			expect(outputLines).toEqual(["single.txt"]);
+		});
+
+		it("should return cwd-relative scoped results that can be read directly", async () => {
+			const nestedDir = path.join(testDir, "packages", "ai", "src", "providers");
+			fs.mkdirSync(nestedDir, { recursive: true });
+			fs.writeFileSync(path.join(nestedDir, "cursor.ts"), "first\nsecond\n");
+
+			const findResult = await findTool.execute("test-call-13b", {
+				pattern: `${nestedDir}/cursor*`,
+			});
+
+			const outputLines = getTextOutput(findResult)
+				.split("\n")
+				.map(line => line.trim())
+				.filter(Boolean);
+
+			expect(outputLines).toEqual(["packages/ai/src/providers/cursor.ts"]);
+
+			const readResult = await readLinesTool.execute("test-call-13c", {
+				path: outputLines[0],
+				start_line: 1,
+				end_line: 1,
+				include_line_numbers: false,
+			});
+
+			expect(getTextOutput(readResult)).toBe("first");
 		});
 
 		it("should include hidden files that are not gitignored", async () => {

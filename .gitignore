@@ -40,6 +40,7 @@ packages/ai/test/.temp-images/
 
 # Project specific
 !.omp/
+.omp/ssh.json
 .omp/plugins/
 .pi_config/
 .opencode/
@@ -47,6 +48,7 @@ packages/ai/test/.temp-images/
 compaction-results/
 changes/
 __pycache__/
+wiki
 
 # Scratch files
 syntax.jsonl

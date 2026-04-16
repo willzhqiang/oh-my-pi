@@ -9,7 +9,7 @@ Finds files using fast pattern matching that works with any codebase size.
 </instruction>
 
 <output>
-Matching file paths sorted by modification time (most recent first). Truncated at 1000 entries or 50KB (configurable via `limit`).
+Matching file paths relative to the current working directory, sorted by modification time (most recent first). Results should be directly reusable with other file tools. Truncated at 1000 entries or 50KB (configurable via `limit`).
 </output>
 
 <example name="find files">

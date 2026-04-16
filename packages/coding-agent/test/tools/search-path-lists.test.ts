@@ -254,8 +254,8 @@ describe("search tool path lists", () => {
 		const text = getText(result);
 		const details = result.details as { fileCount?: number; scopePath?: string } | undefined;
 
-		expect(text).toContain("ast.ts");
-		expect(text).toContain("grep.txt");
+		expect(text).toContain("packages/ast.ts");
+		expect(text).toContain("packages/grep.txt");
 		expect(text).not.toContain("other/ast.ts");
 		expect(details?.fileCount).toBe(2);
 		expect(details?.scopePath).toBe("packages");

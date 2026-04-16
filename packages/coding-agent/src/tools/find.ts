@@ -113,6 +113,10 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			const globPattern = multiPattern?.globPattern ?? parsedPattern?.globPattern ?? "**/*";
 			const searchPath = resolveToCwd(multiPattern?.basePath ?? parsedPattern?.basePath ?? ".", this.session.cwd);
 			const scopePath = multiPattern?.scopePath ?? formatScopePath(searchPath);
+			const formatResultPath = (matchedPath: string): string => {
+				const absolutePath = path.isAbsolute(matchedPath) ? matchedPath : path.resolve(searchPath, matchedPath);
+				return formatScopePath(absolutePath);
+			};
 
 			if (searchPath === "/") {
 				throw new ToolError("Searching from root directory '/' is not allowed");
@@ -165,7 +169,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				if (!hasGlob && this.#customOps.stat) {
 					const stat = await this.#customOps.stat(searchPath);
 					if (stat.isFile()) {
-						return buildResult([scopePath]);
+						return buildResult([formatScopePath(searchPath)]);
 					}
 				}
 
@@ -173,12 +177,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 					ignore: ["**/node_modules/**", "**/.git/**"],
 					limit: effectiveLimit,
 				});
-				const relativized = results.map(p => {
-					if (p.startsWith(searchPath)) {
-						return p.slice(searchPath.length + 1);
-					}
-					return path.relative(searchPath, p);
-				});
+				const relativized = results.map(formatResultPath);
 
 				return buildResult(relativized);
 			}
@@ -194,7 +193,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			}
 
 			if (!hasGlob && searchStat.isFile()) {
-				return buildResult([scopePath]);
+				return buildResult([formatScopePath(searchPath)]);
 			}
 			if (!searchStat.isDirectory()) {
 				throw new ToolError(`Path is not a directory: ${searchPath}`);
@@ -223,8 +222,9 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			const onMatch = onUpdate
 				? (err: Error | null, match: natives.GlobMatch | null) => {
 						if (err || signal?.aborted || !match) return;
-						let relativePath = match.path;
-						if (!relativePath) return;
+						const matchedPath = match.path;
+						if (!matchedPath) return;
+						let relativePath = formatResultPath(matchedPath);
 						if (match.fileType === natives.FileType.Dir && !relativePath.endsWith("/")) {
 							relativePath += "/";
 						}
@@ -279,7 +279,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				}
 
 				const hadTrailingSlash = line.endsWith("/") || line.endsWith("\\");
-				let relativePath = line;
+				let relativePath = formatResultPath(line);
 				const isDirectory = match.fileType === natives.FileType.Dir;
 				if ((isDirectory || hadTrailingSlash) && !relativePath.endsWith("/")) {
 					relativePath += "/";
