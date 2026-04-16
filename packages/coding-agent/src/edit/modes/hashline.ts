@@ -84,10 +84,12 @@ function collectLinePrefixStats(lines: string[]): LinePrefixStats {
 			stats.truncationNoticeCount++;
 			continue;
 		}
-		stats.nonEmpty++;
 		const hasInlineNum = INLINE_LINE_NUM_RE.test(line);
-		if (hasInlineNum) stats.inlineLineNumCount++;
 		const effective = hasInlineNum ? stripInlineLineNum(line) : line;
+		// A line like "  4|" is just a line-number prefix with no content — treat as empty.
+		if (effective.length === 0 && hasInlineNum) continue;
+		stats.nonEmpty++;
+		if (hasInlineNum) stats.inlineLineNumCount++;
 		if (HASHLINE_PREFIX_RE.test(effective)) stats.hashPrefixCount++;
 		if (HASHLINE_PREFIX_PLUS_RE.test(effective)) stats.diffPlusHashPrefixCount++;
 		if (DIFF_PLUS_RE.test(effective)) stats.diffPlusCount++;
@@ -106,18 +108,24 @@ function stripLeadingHashlinePrefixes(line: string): string {
 	return result;
 }
 
-function filterTruncationNotices(lines: string[]): string[] {
+function _filterTruncationNotices(lines: string[]): string[] {
 	return lines.filter(line => !READ_TRUNCATION_NOTICE_RE.test(line));
 }
 
 export function stripNewLinePrefixes(lines: string[]): string[] {
-	const { nonEmpty, hashPrefixCount, diffPlusHashPrefixCount, diffPlusCount, inlineLineNumCount } = collectLinePrefixStats(lines);
+	const { nonEmpty, hashPrefixCount, diffPlusHashPrefixCount, diffPlusCount, inlineLineNumCount } =
+		collectLinePrefixStats(lines);
 	if (nonEmpty === 0) return lines;
 
 	const stripHash = hashPrefixCount > 0 && hashPrefixCount === nonEmpty;
-	const stripInlineOnly = !stripHash && hashPrefixCount === 0 && inlineLineNumCount > 0 && inlineLineNumCount === nonEmpty;
+	const stripInlineOnly =
+		!stripHash && hashPrefixCount === 0 && inlineLineNumCount > 0 && inlineLineNumCount === nonEmpty;
 	const stripPlus =
-		!stripHash && !stripInlineOnly && diffPlusHashPrefixCount === 0 && diffPlusCount > 0 && diffPlusCount >= nonEmpty * 0.5;
+		!stripHash &&
+		!stripInlineOnly &&
+		diffPlusHashPrefixCount === 0 &&
+		diffPlusCount > 0 &&
+		diffPlusCount >= nonEmpty * 0.5;
 	if (!stripHash && !stripInlineOnly && !stripPlus && diffPlusHashPrefixCount === 0) return lines;
 
 	const mapped = lines

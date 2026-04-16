@@ -959,23 +959,14 @@ describe("stripNewLinePrefixes", () => {
 	});
 
 	it("strips hashline prefixes when generic read truncation notice is present", () => {
-		const lines = [
-			"1#BQ:line one",
-			"2#XS:line two",
-			"",
-			"[42 more lines in file. Use sel=L3 to continue]",
-		];
+		const lines = ["1#BQ:line one", "2#XS:line two", "", "[42 more lines in file. Use sel=L3 to continue]"];
 		const result = stripNewLinePrefixes(lines);
 		expect(result[0]).toBe("line one");
 		expect(result[1]).toBe("line two");
 	});
 
 	it("strips nested hashline prefixes (already-corrupted content re-read)", () => {
-		const lines = [
-			"1#NX:1#BQ:---",
-			"2#TY:2#XS:title: example",
-			"3#JZ:3#BQ:---",
-		];
+		const lines = ["1#NX:1#BQ:---", "2#TY:2#XS:title: example", "3#JZ:3#BQ:---"];
 		const result = stripNewLinePrefixes(lines);
 		expect(result[0]).toBe("---");
 		expect(result[1]).toBe("title: example");
@@ -983,11 +974,7 @@ describe("stripNewLinePrefixes", () => {
 	});
 
 	it("strips Cursor N| prefix combined with hashline prefix (N|N#XX:content)", () => {
-		const lines = [
-			"     1|1#BQ:---",
-			"     2|2#XS:title: example",
-			"     3|3#BQ:---",
-		];
+		const lines = ["     1|1#BQ:---", "     2|2#XS:title: example", "     3|3#BQ:---"];
 		const result = stripNewLinePrefixes(lines);
 		expect(result[0]).toBe("---");
 		expect(result[1]).toBe("title: example");
@@ -1009,13 +996,45 @@ describe("stripNewLinePrefixes", () => {
 	});
 
 	it("does NOT strip N| when not all non-empty lines have the prefix", () => {
-		const lines = [
-			"  1|import foo;",
-			"plain line without prefix",
-			"  3|export bar;",
-		];
+		const lines = ["  1|import foo;", "plain line without prefix", "  3|export bar;"];
 		const result = stripNewLinePrefixes(lines);
 		expect(result).toEqual(lines);
+	});
+
+	// Cursor exec handler path: full file read with truncation
+	it("strips hashline prefixes from Cursor exec handler truncated read output (multi-line)", () => {
+		const lines = [
+			"1#BQ:---",
+			"2#XS:created: 2026-01-01",
+			"3#BQ:---",
+			"",
+			"5#VV:# Title",
+			"6#WQ:content here",
+			"[Showing lines 1-6 of 100. Use sel=L7 to continue]",
+		];
+		const result = stripNewLinePrefixes(lines);
+		expect(result).toEqual(["---", "created: 2026-01-01", "---", "", "# Title", "content here"]);
+	});
+
+	// Second corruption cycle: nested hashline + truncation marker
+	it("strips double-nested hashline prefixes with truncation marker (second corruption cycle)", () => {
+		const lines = [
+			"1#NX:1#BQ:---",
+			"2#TY:2#XS:created: 2026-01-01",
+			"3#JZ:3#BQ:---",
+			"",
+			"5#ZZ:5#VV:# Title",
+			"[Showing lines 1-5 of 50. Use sel=L6 to continue]",
+		];
+		const result = stripNewLinePrefixes(lines);
+		expect(result).toEqual(["---", "created: 2026-01-01", "---", "", "# Title"]);
+	});
+
+	// Cursor read_lines N| combined with hashline (model mixes both outputs)
+	it("handles mixed N| and hashline from Cursor combining read_lines + read output", () => {
+		const lines = ["  1|1#BQ:---", "  2|2#XS:title: test", "  3|3#BQ:---", "  4|", "  5|5#VV:# Heading"];
+		const result = stripNewLinePrefixes(lines);
+		expect(result).toEqual(["---", "title: test", "---", "", "# Heading"]);
 	});
 });
 
@@ -1049,45 +1068,51 @@ describe("stripHashlinePrefixes", () => {
 	});
 
 	it("strips nested hashline prefixes from already-corrupted content", () => {
-		const lines = [
-			"1#NX:1#BQ:---",
-			"2#TY:2#XS:title",
-		];
+		const lines = ["1#NX:1#BQ:---", "2#TY:2#XS:title"];
 		const result = stripHashlinePrefixes(lines);
 		expect(result[0]).toBe("---");
 		expect(result[1]).toBe("title");
 	});
 
 	it("strips Cursor N| prefix combined with hashline in write content", () => {
-		const lines = [
-			"     1|1#BQ:---",
-			"     2|2#XS:title",
-			"",
-			"     4|4#VV:content",
-		];
+		const lines = ["     1|1#BQ:---", "     2|2#XS:title", "", "     4|4#VV:content"];
 		const result = stripHashlinePrefixes(lines);
 		expect(result).toEqual(["---", "title", "", "content"]);
 	});
 
 	it("strips standalone N| prefixes from write content", () => {
-		const lines = [
-			"  1|import { foo } from 'bar';",
-			"  2|",
-			"  3|export default {};",
-		];
+		const lines = ["  1|import { foo } from 'bar';", "  2|", "  3|export default {};"];
 		const result = stripHashlinePrefixes(lines);
 		expect(result).toEqual(["import { foo } from 'bar';", "", "export default {};"]);
 	});
 
 	it("does NOT strip N| when not all non-empty lines match", () => {
-		const lines = [
-			"  1|import foo;",
-			"plain text",
-		];
+		const lines = ["  1|import foo;", "plain text"];
 		const result = stripHashlinePrefixes(lines);
 		expect(result).toBe(lines);
 	});
 
+	// Cursor write path: full read output paste-back with truncation
+	it("strips full hashline read output pasted into write tool (Cursor scenario)", () => {
+		const lines = [
+			"1#BQ:---",
+			"2#XS:title: my-doc",
+			"3#BQ:---",
+			"",
+			"5#VV:Some content",
+			"6#WQ:More content",
+			"[42 more lines in file. Use sel=L7 to continue]",
+		];
+		const result = stripHashlinePrefixes(lines);
+		expect(result).toEqual(["---", "title: my-doc", "---", "", "Some content", "More content"]);
+	});
+
+	// Cursor write path: double-nested hashline from corruption cycle
+	it("strips double-nested hashline prefixes in write content (corruption cycle)", () => {
+		const lines = ["1#NX:1#BQ:---", "2#TY:2#XS:title", "", "4#ZZ:4#VV:content"];
+		const result = stripHashlinePrefixes(lines);
+		expect(result).toEqual(["---", "title", "", "content"]);
+	});
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1201,5 +1226,33 @@ describe("hashlineParseContent", () => {
 		];
 		const result = applyHashlineEdits(fileContent, edits);
 		expect(result.lines).toBe("const x = 1;\n// TODO: old\n# TODO: remove this -- done\nconst y = 2;");
+	});
+
+	// Cursor edit path: model pastes hashline-prefixed content as string
+	it("strips hashline prefixes from Cursor edit content string input", () => {
+		const input = "1#BQ:---\n2#XS:title\n3#BQ:---";
+		const result = hashlineParseText(input);
+		expect(result).toEqual(["---", "title", "---"]);
+	});
+
+	// Cursor edit path: model pastes N| line-number prefixed content as array
+	it("strips N| prefixes from Cursor edit content array input", () => {
+		const input = ["  1|line one", "  2|line two", "  3|line three"];
+		const result = hashlineParseText(input);
+		expect(result).toEqual(["line one", "line two", "line three"]);
+	});
+
+	// Cursor edit path: model pastes N| + hashline combined content as string
+	it("strips N| + hashline combined prefixes from Cursor edit content string", () => {
+		const input = "     1|1#BQ:---\n     2|2#XS:title\n     3|3#BQ:---";
+		const result = hashlineParseText(input);
+		expect(result).toEqual(["---", "title", "---"]);
+	});
+
+	// Cursor edit path: content with truncation marker in string input
+	it("strips hashline prefixes and truncation marker from Cursor edit string input", () => {
+		const input = "1#BQ:line one\n2#XS:line two\n[Showing lines 1-2 of 50. Use sel=L3 to continue]";
+		const result = hashlineParseText(input);
+		expect(result).toEqual(["line one", "line two"]);
 	});
 });
