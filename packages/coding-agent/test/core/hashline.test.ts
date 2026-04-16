@@ -981,6 +981,42 @@ describe("stripNewLinePrefixes", () => {
 		expect(result[1]).toBe("title: example");
 		expect(result[2]).toBe("---");
 	});
+
+	it("strips Cursor N| prefix combined with hashline prefix (N|N#XX:content)", () => {
+		const lines = [
+			"     1|1#BQ:---",
+			"     2|2#XS:title: example",
+			"     3|3#BQ:---",
+		];
+		const result = stripNewLinePrefixes(lines);
+		expect(result[0]).toBe("---");
+		expect(result[1]).toBe("title: example");
+		expect(result[2]).toBe("---");
+	});
+
+	it("strips standalone N| line-number prefixes from read_lines output", () => {
+		const lines = [
+			"  1|import { foo } from 'bar';",
+			"  2|import { baz } from 'qux';",
+			"  3|",
+			"  4|export default function main() {",
+		];
+		const result = stripNewLinePrefixes(lines);
+		expect(result[0]).toBe("import { foo } from 'bar';");
+		expect(result[1]).toBe("import { baz } from 'qux';");
+		expect(result[2]).toBe("");
+		expect(result[3]).toBe("export default function main() {");
+	});
+
+	it("does NOT strip N| when not all non-empty lines have the prefix", () => {
+		const lines = [
+			"  1|import foo;",
+			"plain line without prefix",
+			"  3|export bar;",
+		];
+		const result = stripNewLinePrefixes(lines);
+		expect(result).toEqual(lines);
+	});
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1020,6 +1056,36 @@ describe("stripHashlinePrefixes", () => {
 		const result = stripHashlinePrefixes(lines);
 		expect(result[0]).toBe("---");
 		expect(result[1]).toBe("title");
+	});
+
+	it("strips Cursor N| prefix combined with hashline in write content", () => {
+		const lines = [
+			"     1|1#BQ:---",
+			"     2|2#XS:title",
+			"",
+			"     4|4#VV:content",
+		];
+		const result = stripHashlinePrefixes(lines);
+		expect(result).toEqual(["---", "title", "", "content"]);
+	});
+
+	it("strips standalone N| prefixes from write content", () => {
+		const lines = [
+			"  1|import { foo } from 'bar';",
+			"  2|",
+			"  3|export default {};",
+		];
+		const result = stripHashlinePrefixes(lines);
+		expect(result).toEqual(["import { foo } from 'bar';", "", "export default {};"]);
+	});
+
+	it("does NOT strip N| when not all non-empty lines match", () => {
+		const lines = [
+			"  1|import foo;",
+			"plain text",
+		];
+		const result = stripHashlinePrefixes(lines);
+		expect(result).toBe(lines);
 	});
 
 });

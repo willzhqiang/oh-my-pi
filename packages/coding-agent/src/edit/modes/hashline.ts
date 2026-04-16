@@ -49,6 +49,7 @@ export type HashlineEdit =
 	| { op: "append_file"; lines: string[] }
 	| { op: "prepend_file"; lines: string[] };
 
+const INLINE_LINE_NUM_RE = /^\s*\d+\s*\|/;
 const HASHLINE_PREFIX_RE = /^\s*(?:>>>|>>)?\s*(?:\+?\s*(?:\d+\s*#\s*|#\s*)|\+)\s*[ZPMQVRWSNKTXJBYH]{2}:/;
 const HASHLINE_PREFIX_PLUS_RE = /^\s*(?:>>>|>>)?\s*\+\s*(?:\d+\s*#\s*|#\s*)?[ZPMQVRWSNKTXJBYH]{2}:/;
 const DIFF_PLUS_RE = /^[+](?![+])/;
@@ -60,7 +61,12 @@ type LinePrefixStats = {
 	diffPlusHashPrefixCount: number;
 	diffPlusCount: number;
 	truncationNoticeCount: number;
+	inlineLineNumCount: number;
 };
+
+function stripInlineLineNum(line: string): string {
+	return line.replace(INLINE_LINE_NUM_RE, "");
+}
 
 function collectLinePrefixStats(lines: string[]): LinePrefixStats {
 	const stats: LinePrefixStats = {
@@ -69,6 +75,7 @@ function collectLinePrefixStats(lines: string[]): LinePrefixStats {
 		diffPlusHashPrefixCount: 0,
 		diffPlusCount: 0,
 		truncationNoticeCount: 0,
+		inlineLineNumCount: 0,
 	};
 
 	for (const line of lines) {
@@ -78,16 +85,19 @@ function collectLinePrefixStats(lines: string[]): LinePrefixStats {
 			continue;
 		}
 		stats.nonEmpty++;
-		if (HASHLINE_PREFIX_RE.test(line)) stats.hashPrefixCount++;
-		if (HASHLINE_PREFIX_PLUS_RE.test(line)) stats.diffPlusHashPrefixCount++;
-		if (DIFF_PLUS_RE.test(line)) stats.diffPlusCount++;
+		const hasInlineNum = INLINE_LINE_NUM_RE.test(line);
+		if (hasInlineNum) stats.inlineLineNumCount++;
+		const effective = hasInlineNum ? stripInlineLineNum(line) : line;
+		if (HASHLINE_PREFIX_RE.test(effective)) stats.hashPrefixCount++;
+		if (HASHLINE_PREFIX_PLUS_RE.test(effective)) stats.diffPlusHashPrefixCount++;
+		if (DIFF_PLUS_RE.test(effective)) stats.diffPlusCount++;
 	}
 
 	return stats;
 }
 
 function stripLeadingHashlinePrefixes(line: string): string {
-	let result = line;
+	let result = INLINE_LINE_NUM_RE.test(line) ? stripInlineLineNum(line) : line;
 	let prev: string;
 	do {
 		prev = result;
@@ -101,18 +111,20 @@ function filterTruncationNotices(lines: string[]): string[] {
 }
 
 export function stripNewLinePrefixes(lines: string[]): string[] {
-	const { nonEmpty, hashPrefixCount, diffPlusHashPrefixCount, diffPlusCount } = collectLinePrefixStats(lines);
+	const { nonEmpty, hashPrefixCount, diffPlusHashPrefixCount, diffPlusCount, inlineLineNumCount } = collectLinePrefixStats(lines);
 	if (nonEmpty === 0) return lines;
 
 	const stripHash = hashPrefixCount > 0 && hashPrefixCount === nonEmpty;
+	const stripInlineOnly = !stripHash && hashPrefixCount === 0 && inlineLineNumCount > 0 && inlineLineNumCount === nonEmpty;
 	const stripPlus =
-		!stripHash && diffPlusHashPrefixCount === 0 && diffPlusCount > 0 && diffPlusCount >= nonEmpty * 0.5;
-	if (!stripHash && !stripPlus && diffPlusHashPrefixCount === 0) return lines;
+		!stripHash && !stripInlineOnly && diffPlusHashPrefixCount === 0 && diffPlusCount > 0 && diffPlusCount >= nonEmpty * 0.5;
+	if (!stripHash && !stripInlineOnly && !stripPlus && diffPlusHashPrefixCount === 0) return lines;
 
 	const mapped = lines
 		.filter(line => !READ_TRUNCATION_NOTICE_RE.test(line))
 		.map(line => {
 			if (stripHash) return stripLeadingHashlinePrefixes(line);
+			if (stripInlineOnly) return stripInlineLineNum(line);
 			if (stripPlus) return line.replace(DIFF_PLUS_RE, "");
 			if (diffPlusHashPrefixCount > 0 && HASHLINE_PREFIX_PLUS_RE.test(line)) {
 				return line.replace(HASHLINE_PREFIX_RE, "");
@@ -123,12 +135,19 @@ export function stripNewLinePrefixes(lines: string[]): string[] {
 }
 
 export function stripHashlinePrefixes(lines: string[]): string[] {
-	const { nonEmpty, hashPrefixCount } = collectLinePrefixStats(lines);
+	const { nonEmpty, hashPrefixCount, inlineLineNumCount } = collectLinePrefixStats(lines);
 	if (nonEmpty === 0) return lines;
-	if (hashPrefixCount !== nonEmpty) return lines;
-	return lines
-		.filter(line => !READ_TRUNCATION_NOTICE_RE.test(line))
-		.map(line => stripLeadingHashlinePrefixes(line));
+	if (hashPrefixCount === nonEmpty) {
+		return lines
+			.filter(line => !READ_TRUNCATION_NOTICE_RE.test(line))
+			.map(line => stripLeadingHashlinePrefixes(line));
+	}
+	if (inlineLineNumCount === nonEmpty) {
+		return lines
+			.filter(line => !READ_TRUNCATION_NOTICE_RE.test(line))
+			.map(line => (line.length === 0 ? line : stripInlineLineNum(line)));
+	}
+	return lines;
 }
 
 const linesSchema = Type.Union([

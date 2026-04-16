@@ -1,7 +1,8 @@
 import * as fs from "node:fs/promises";
-import type { AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { type Static, Type } from "@sinclair/typebox";
 import type { ToolSession } from ".";
+import type { OutputMeta } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
@@ -23,6 +24,7 @@ export interface ReadLinesToolDetails {
 	endLine: number;
 	totalLines: number;
 	returnedLines: number;
+	meta?: OutputMeta;
 }
 
 function splitTextLines(text: string): string[] {
@@ -51,13 +53,13 @@ export class ReadLinesTool implements AgentTool<typeof readLinesSchema, ReadLine
 	readonly parameters = readLinesSchema;
 	readonly strict = true;
 
-	constructor(private readonly session: ToolSession) {}
+	constructor(readonly session: ToolSession) {}
 
 	async execute(
 		_toolCallId: string,
 		params: ReadLinesToolInput,
 		_signal?: AbortSignal,
-		_onUpdate?: never,
+		_onUpdate?: AgentToolUpdateCallback<ReadLinesToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<ReadLinesToolDetails>> {
 		const startLine = Math.trunc(params.start_line);
