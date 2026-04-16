@@ -56,6 +56,7 @@ describe("createTools", () => {
 		expect(names).toContain("python");
 		expect(names).toContain("bash");
 		expect(names).toContain("read");
+		expect(names).toContain("read_lines");
 		expect(names).toContain("edit");
 		expect(names).toContain("write");
 		expect(names).toContain("grep");
@@ -143,10 +144,10 @@ describe("createTools", () => {
 
 	it("respects requested tool subset", async () => {
 		const session = createTestSession();
-		const tools = await createTools(session, ["read", "write"]);
+		const tools = await createTools(session, ["read", "read_lines", "write"]);
 		const names = tools.map(t => t.name);
 
-		expect(names).toEqual(["read", "write", "exit_plan_mode"]);
+		expect(names).toEqual(["read", "read_lines", "write", "exit_plan_mode"]);
 	});
 
 	it("ignores vim as an unknown requested tool even when vim edit mode is active", async () => {

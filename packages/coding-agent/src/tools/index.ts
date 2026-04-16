@@ -46,6 +46,7 @@ import { NotebookTool } from "./notebook";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { PollTool } from "./poll-tool";
 import { PythonTool } from "./python";
+import { ReadLinesTool } from "./read-lines";
 import { ReadTool } from "./read";
 import { RenderMermaidTool } from "./render-mermaid";
 import { createReportToolIssueTool, isAutoQaEnabled } from "./report-tool-issue";
@@ -84,6 +85,7 @@ export * from "./inspect-image";
 export * from "./notebook";
 export * from "./poll-tool";
 export * from "./python";
+export * from "./read-lines";
 export * from "./read";
 export * from "./render-mermaid";
 export * from "./report-tool-issue";
@@ -231,6 +233,7 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	lsp: LspTool.createIf,
 	notebook: s => new NotebookTool(s),
 	read: s => new ReadTool(s),
+	read_lines: s => new ReadLinesTool(s),
 	inspect_image: s => new InspectImageTool(s),
 	browser: s => new BrowserTool(s),
 	checkpoint: CheckpointTool.createIf,
