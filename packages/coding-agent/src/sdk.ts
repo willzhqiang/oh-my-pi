@@ -1276,12 +1276,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const cursorToolRoutingPrompt =
 			model?.provider === "cursor"
 				? [
-					"## Cursor Tool Routing",
-					"When running on the Cursor provider, avoid the native `read` tool for large files because its exec-handler path can drop paging arguments.",
-					"Use `read_lines` for exact line ranges when you already know the target lines.",
-					"Use `grep` or `bash` with `rg -n` to locate code before reading.",
-					"Use `bash` with `sed -n 'START,ENDp' file` to page through large files.",
-				].join("\n")
+						"## Cursor Tool Routing",
+						"When running on the Cursor provider, avoid the native `read` tool for large files because its exec-handler path can drop paging arguments.",
+						"Use `read_lines` for exact line ranges when you already know the target lines.",
+						"Use `grep` or `bash` with `rg -n` to locate code before reading.",
+						"Use `bash` with `sed -n 'START,ENDp' file` to page through large files.",
+					].join("\n")
 				: undefined;
 		const eagerTasks = settings.get("task.eager");
 		const intentField = settings.get("tools.intentTracing") || $flag("PI_INTENT_TRACING") ? INTENT_FIELD : undefined;
@@ -1298,8 +1298,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 			// Build combined append prompt: memory instructions + MCP server instructions
 			const serverInstructions = mcpManager?.getServerInstructions();
-			const appendPromptParts = [memoryInstructions, cursorToolRoutingPrompt].filter((value): value is string => Boolean(value));
-			let appendPrompt: string | undefined = appendPromptParts.length > 0 ? appendPromptParts.join("\n\n") : undefined;
+			const appendPromptParts = [memoryInstructions, cursorToolRoutingPrompt].filter((value): value is string =>
+				Boolean(value),
+			);
+			let appendPrompt: string | undefined =
+				appendPromptParts.length > 0 ? appendPromptParts.join("\n\n") : undefined;
 			if (serverInstructions && serverInstructions.size > 0) {
 				const MAX_INSTRUCTIONS_LENGTH = 4000;
 				const parts: string[] = [];

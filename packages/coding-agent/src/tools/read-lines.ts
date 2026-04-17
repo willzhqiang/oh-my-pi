@@ -10,7 +10,9 @@ import { toolResult } from "./tool-result";
 const readLinesSchema = Type.Object({
 	path: Type.String({ description: "Path to the text file to read" }),
 	start_line: Type.Number({ description: "1-indexed first line to read (inclusive)" }),
-	end_line: Type.Optional(Type.Number({ description: "1-indexed last line to read (inclusive). Defaults to start_line." })),
+	end_line: Type.Optional(
+		Type.Number({ description: "1-indexed last line to read (inclusive). Defaults to start_line." }),
+	),
 	include_line_numbers: Type.Optional(
 		Type.Boolean({ description: "Include `N|` prefixes in the output (default: true)" }),
 	),
@@ -40,9 +42,7 @@ function splitTextLines(text: string): string[] {
 function formatWithLineNumbers(lines: string[], startLine: number): string {
 	const endLine = startLine + lines.length - 1;
 	const padWidth = String(endLine).length;
-	return lines
-		.map((line, index) => `${String(startLine + index).padStart(padWidth, " ")}|${line}`)
-		.join("\n");
+	return lines.map((line, index) => `${String(startLine + index).padStart(padWidth, " ")}|${line}`).join("\n");
 }
 
 export class ReadLinesTool implements AgentTool<typeof readLinesSchema, ReadLinesToolDetails> {
