@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+## [14.4.2] - 2026-04-26
+### Breaking Changes
+
+- Changed `/todo append` from JSON payload input to `/todo append [<phase>] <task...>` with optional quoted tokens and automatic phase creation
+
+### Added
+
+- Added `note` to todo-write operations so you can append follow-up text notes to a task via `op: "note"` and `text`
+- Added markdown note-block support to `/todo export` and `/todo import` so task notes are written as blockquote lines and reloaded with the todo list
+- Added `/todo export <path>` to write the current todo list as Markdown to a file, defaulting to `TODO.md` when no path is provided
+- Added `/todo import <path>` to replace the current todo list from a Markdown file, defaulting to `TODO.md` when no path is provided
+- Added live poll progress updates so the UI now emits intermediate job state while waiting for jobs to finish
+- Added a dedicated TUI renderer for the `poll` tool that displays job status, counts, duration, and result/error previews
+- Added a `/todo` slash command to view and modify todos with `edit`, `copy`, `start`, `done`, `drop`, `rm`, `append`, and `replace` operations
+- Added `/todo edit` to open the current todo list in `$EDITOR` as Markdown and sync the edited checklist back into the session
+- Added `/todo copy` to copy the rendered Markdown todo list to the clipboard
+
+### Changed
+
+- Changed todo list rendering and summaries to show a `+N` note marker on task lines and display attached notes for tasks in progress
+- Changed `/todo start`, `/todo done`, `/todo drop`, and `/todo rm` to resolve task/phase targets by fuzzy id/name matching instead of strict identifiers
+- Removed `/todo replace` from supported slash commands
+- Changed todo list restoration to include user todo-edit custom session entries so slash-command and editor-based todo updates persist after reload
+- Restored sensible defaults for `grep.contextBefore` (1) and `grep.contextAfter` (3) so grep matches show context lines by default after the `pre`/`post` parameters were folded into settings
+
+### Removed
+
+- Removed the `chunk` edit mode, chunk-aware `read` selectors, chunk-aware `grep` rendering, and the `omp read` chunk CLI subcommand
+- Removed the `read.prosechunks`, `read.explorechunks`, and `read.anchorstyle` settings
+- Removed the underlying `chunk` native module and AST-based chunk schema generation from `pi-natives`
+
+### Fixed
+
+- Fixed poll final output to reflect live job data from the async job manager, improving status and result visibility
+- Fixed job duration and output reporting to use current job snapshots instead of initial poll input metadata
+- Fixed `poll` wait duration parsing to fall back to `30s` when the provided value is an empty string
+
+## [14.4.1] - 2026-04-26
 ### Breaking Changes
 
 - Replaced the legacy `gh_repo_view`, `gh_issue_view`, `gh_pr_view`, `gh_pr_diff`, `gh_pr_checkout`, `gh_pr_push`, `gh_run_watch`, `gh_search_issues`, and `gh_search_prs` tool names with only `github`, which requires updating existing callers that invoked the old `gh_*` tools
@@ -9,22 +47,23 @@
 ### Added
 
 - Added a `sed` verb to the `atom` edit tool for line-local substitutions using sed-style syntax (`s/pattern/replacement/`) with `g`, `i`, and `F` flags and model-tolerant delimiter choices
-- 
 - Added the unified `github` tool with op-based dispatch for repository, issue, pull request, search, checkout, push, and Actions watch workflows
 - Added `op` routing so callers can select `repo_view`, `issue_view`, `pr_view`, `pr_diff`, `pr_checkout`, `pr_push`, `search_issues`, `search_prs`, or `run_watch` through a single tool entry point
 
 ### Changed
 
 - Changed hashline-based read and match output formatting to use `LINE+ID|content` as the anchor/content separator, and updated match/context markers to `>` for matches and `:` for context
-- 
 - Updated GitHub CLI render output to show `GitHub <op>` for tool calls dispatched through `github` operations
+
+### Removed
+
+- Removed the built-in `taplo` Language Server entry from default LSP settings, so TOML files no longer have default TOML server startup
 
 ### Fixed
 
 - Fixed `atom` `loc` parsing so path-qualified anchors like `path:263ti| ...` and single-anchor locs containing hyphens no longer mis-parse as ranges
 - Fixed hashline anchor handling in `atom` edits so a provided content hint after the anchor (`|` or `:` suffix) can rebond a stale hash to the intended line
 - Fixed `atom` `sed` execution to tolerate common model-emitted forms such as `/pat/rep/`, and to apply safe literal fallbacks for regex failures or metacharacter-heavy patterns while still erroring when no match is possible
-- 
 
 ## [14.4.0] - 2026-04-26
 

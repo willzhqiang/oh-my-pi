@@ -94,7 +94,7 @@ interface EditRenderArgs {
 	 */
 	previewDiff?: string;
 	__partialJson?: string;
-	// Hashline / chunk mode fields
+	// Hashline mode fields
 	edits?: EditRenderEntry[];
 }
 
@@ -141,7 +141,7 @@ export interface EditRenderContext {
 	editMode?: EditMode;
 	/** Pre-computed diff preview (computed before tool executes) */
 	editDiffPreview?: DiffResult | DiffError;
-	/** Multi-file streaming diff preview (chunk edits spanning several files) */
+	/** Multi-file streaming diff preview (edits spanning several files) */
 	perFileDiffPreview?: PerFileDiffPreview[];
 	/** Function to render diff text with syntax highlighting */
 	renderDiff?: (diffText: string, options?: { filePath?: string }) => string;
@@ -151,11 +151,9 @@ const EDIT_STREAMING_PREVIEW_LINES = 12;
 const CALL_TEXT_PREVIEW_LINES = 6;
 const CALL_TEXT_PREVIEW_WIDTH = 80;
 
-/** Extract file path from an edit entry's path (handles chunk's file:selector format). */
+/** Extract file path from an edit entry. */
 function filePathFromEditEntry(p: string | undefined): string | undefined {
-	if (!p) return undefined;
-	const ci = /^[a-zA-Z]:[/\\]/.test(p) ? p.indexOf(":", 2) : p.indexOf(":");
-	return ci === -1 ? p : p.slice(0, ci);
+	return p ?? undefined;
 }
 
 function decodePartialJsonStringFragment(fragment: string): string {
@@ -284,7 +282,7 @@ function formatMultiFileStreamingDiff(previews: PerFileDiffPreview[], uiTheme: T
 	const parts: string[] = [];
 	for (const preview of previews) {
 		if (!preview.diff && !preview.error) continue;
-		const header = uiTheme.fg("dim", `\n\n── ${shortenPath(preview.path)} ──`);
+		const header = uiTheme.fg("dim", `\n\n\u2500\u2500 ${shortenPath(preview.path)} \u2500\u2500`);
 		if (preview.error) {
 			parts.push(`${header}\n${uiTheme.fg("error", replaceTabs(preview.error))}`);
 			continue;
@@ -303,7 +301,7 @@ function getCallPreview(
 	renderContext: EditRenderContext | undefined,
 ): string {
 	const multi = renderContext?.perFileDiffPreview;
-	if (multi && multi.length > 0 && multi.some(p => p.diff || p.error)) {
+	if (multi && multi.length > 1 && multi.some(p => p.diff || p.error)) {
 		return formatMultiFileStreamingDiff(multi, uiTheme);
 	}
 	if (args.previewDiff) {

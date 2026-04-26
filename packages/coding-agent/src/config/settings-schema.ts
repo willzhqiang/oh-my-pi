@@ -955,12 +955,12 @@ export const SETTINGS_SCHEMA = {
 	// Edit tool
 	"edit.mode": {
 		type: "enum",
-		values: ["replace", "patch", "hashline", "chunk", "vim", "apply_patch", "atom"] as const,
+		values: ["replace", "patch", "hashline", "vim", "apply_patch", "atom"] as const,
 		default: "hashline",
 		ui: {
 			tab: "editing",
 			label: "Edit Mode",
-			description: "Select the edit tool variant (replace, patch, hashline, chunk, vim, or apply_patch)",
+			description: "Select the edit tool variant (replace, patch, hashline, vim, or apply_patch)",
 		},
 	},
 
@@ -1043,38 +1043,6 @@ export const SETTINGS_SCHEMA = {
 			tab: "editing",
 			label: "Inline Read Previews",
 			description: "Render read tool results inline in the transcript instead of summary rows",
-		},
-	},
-
-	"read.prosechunks": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "editing",
-			label: "Prose Chunks",
-			description: "Enable chunk rendering for prose files in chunk edit mode",
-		},
-	},
-
-	"read.explorechunks": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "editing",
-			label: "Explore Chunks",
-			description: "Show chunk tree without checksums for read-only agents like explore",
-		},
-	},
-
-	"read.anchorstyle": {
-		type: "enum",
-		values: ["full", "kind", "bare"],
-		default: "full",
-		ui: {
-			tab: "editing",
-			label: "Anchor Style",
-			description: "Render chunk anchors with full names, kind prefixes, or checksum-only tags",
-			submenu: true,
 		},
 	},
 
@@ -1238,7 +1206,7 @@ export const SETTINGS_SCHEMA = {
 
 	"grep.contextBefore": {
 		type: "number",
-		default: 0,
+		default: 1,
 		ui: {
 			tab: "tools",
 			label: "Grep Context Before",
@@ -1249,7 +1217,7 @@ export const SETTINGS_SCHEMA = {
 
 	"grep.contextAfter": {
 		type: "number",
-		default: 0,
+		default: 3,
 		ui: {
 			tab: "tools",
 			label: "Grep Context After",
@@ -1429,6 +1397,18 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "Max Async Jobs",
 			description: "Maximum concurrent background jobs (1-100)",
+			submenu: true,
+		},
+	},
+
+	"async.pollWaitDuration": {
+		type: "enum",
+		values: ["5s", "10s", "30s", "1m", "5m"] as const,
+		default: "30s",
+		ui: {
+			tab: "tools",
+			label: "Poll Wait Duration",
+			description: "How long the poll tool waits for background job updates before returning the current state",
 			submenu: true,
 		},
 	},

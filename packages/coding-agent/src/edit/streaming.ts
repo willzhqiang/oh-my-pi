@@ -16,7 +16,6 @@ import type { Theme } from "../modes/theme/theme";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { computeEditDiff, type DiffError, type DiffResult } from "./diff";
 import { expandApplyPatchToEntries, expandApplyPatchToPreviewEntries } from "./modes/apply-patch";
-import { type ChunkToolEdit, computeChunkDiff, parseChunkEditPath } from "./modes/chunk";
 import { computeHashlineDiff, type HashlineToolEdit } from "./modes/hashline";
 import { computePatchDiff, type PatchEditEntry } from "./modes/patch";
 import type { ReplaceEditEntry } from "./modes/replace";
@@ -127,6 +126,38 @@ export function dropIncompleteLastEdit<T>(edits: readonly T[], partialJson: stri
 }
 
 // -----------------------------------------------------------------------------
+// Multi-file grouping
+// -----------------------------------------------------------------------------
+
+/** Cap on how many distinct files a streaming preview will render diffs for. */
+const MAX_PREVIEW_FILES = 5;
+
+/**
+ * Group a list of edits by their effective `path` (per-edit `path` falls back
+ * to the top-level `args.path`). Insertion order is preserved and the number of
+ * distinct buckets is capped at {@link MAX_PREVIEW_FILES}.
+ */
+function groupEditsByPath<T extends { path?: string }>(
+	edits: readonly T[],
+	fallbackPath: string | undefined,
+): Map<string, Array<T & { path: string }>> {
+	const groups = new Map<string, Array<T & { path: string }>>();
+	for (const edit of edits) {
+		if (!edit) continue;
+		const editPath = edit.path ?? fallbackPath;
+		if (!editPath) continue;
+		let bucket = groups.get(editPath);
+		if (!bucket) {
+			if (groups.size >= MAX_PREVIEW_FILES) continue;
+			bucket = [];
+			groups.set(editPath, bucket);
+		}
+		bucket.push({ ...edit, path: editPath });
+	}
+	return groups;
+}
+
+// -----------------------------------------------------------------------------
 // Strategies
 // -----------------------------------------------------------------------------
 
@@ -142,22 +173,26 @@ const replaceStrategy: EditStreamingStrategy<ReplaceArgs> = {
 		return { ...args, edits: dropIncompleteLastEdit(args.edits, partialJson, "edits") };
 	},
 	async computeDiffPreview(args, ctx) {
-		const first = args.edits?.[0];
-		if (!first) return null;
-		const path = first.path ?? args.path;
-		if (!path || first.old_text === undefined || first.new_text === undefined) return null;
-		ctx.signal.throwIfAborted();
-		const result = await computeEditDiff(
-			path,
-			first.old_text,
-			first.new_text,
-			ctx.cwd,
-			ctx.allowFuzzy ?? true,
-			first.all,
-			ctx.fuzzyThreshold,
-		);
-		ctx.signal.throwIfAborted();
-		return [toPerFilePreview(path, result)];
+		const groups = groupEditsByPath(args.edits ?? [], args.path);
+		if (groups.size === 0) return null;
+		const previews: PerFileDiffPreview[] = [];
+		for (const [path, fileEdits] of groups) {
+			const first = fileEdits[0];
+			if (!first || first.old_text === undefined || first.new_text === undefined) continue;
+			ctx.signal.throwIfAborted();
+			const result = await computeEditDiff(
+				path,
+				first.old_text,
+				first.new_text,
+				ctx.cwd,
+				ctx.allowFuzzy ?? true,
+				first.all,
+				ctx.fuzzyThreshold,
+			);
+			ctx.signal.throwIfAborted();
+			previews.push(toPerFilePreview(path, result));
+		}
+		return previews.length > 0 ? previews : null;
 	},
 	renderStreamingFallback() {
 		return "";
@@ -176,17 +211,22 @@ const patchStrategy: EditStreamingStrategy<PatchArgs> = {
 		return { ...args, edits: dropIncompleteLastEdit(args.edits, partialJson, "edits") };
 	},
 	async computeDiffPreview(args, ctx) {
-		const first = args.edits?.[0];
-		const path = first?.path ?? args.path;
-		if (!path) return null;
-		ctx.signal.throwIfAborted();
-		const result = await computePatchDiff(
-			{ path, op: first?.op ?? "update", rename: first?.rename, diff: first?.diff },
-			ctx.cwd,
-			{ fuzzyThreshold: ctx.fuzzyThreshold, allowFuzzy: ctx.allowFuzzy },
-		);
-		ctx.signal.throwIfAborted();
-		return [toPerFilePreview(path, result)];
+		const groups = groupEditsByPath(args.edits ?? [], args.path);
+		if (groups.size === 0) return null;
+		const previews: PerFileDiffPreview[] = [];
+		for (const [path, fileEdits] of groups) {
+			const first = fileEdits[0];
+			if (!first) continue;
+			ctx.signal.throwIfAborted();
+			const result = await computePatchDiff(
+				{ path, op: first.op ?? "update", rename: first.rename, diff: first.diff },
+				ctx.cwd,
+				{ fuzzyThreshold: ctx.fuzzyThreshold, allowFuzzy: ctx.allowFuzzy },
+			);
+			ctx.signal.throwIfAborted();
+			previews.push(toPerFilePreview(path, result));
+		}
+		return previews.length > 0 ? previews : null;
 	},
 	renderStreamingFallback() {
 		return "";
@@ -205,83 +245,14 @@ const hashlineStrategy: EditStreamingStrategy<HashlineArgs> = {
 		return { ...args, edits: dropIncompleteLastEdit(args.edits, partialJson, "edits") };
 	},
 	async computeDiffPreview(args, ctx) {
-		const first = args.edits?.[0] as (HashlineToolEdit & { path?: string }) | undefined;
-		const path = first?.path ?? args.path;
-		if (!path) return null;
-		const fileEdits = (args.edits ?? [])
-			.map(e => {
-				if (!e || typeof e !== "object") return undefined;
-				const entryPath = (e as { path?: string }).path ?? args.path;
-				if (!entryPath || entryPath !== path) return undefined;
-				return { ...(e as HashlineToolEdit), path } as HashlineToolEdit & { path: string };
-			})
-			.filter((e): e is HashlineToolEdit & { path: string } => e !== undefined);
-		ctx.signal.throwIfAborted();
-		const result = await computeHashlineDiff({ path, edits: fileEdits }, ctx.cwd);
-		ctx.signal.throwIfAborted();
-		return [toPerFilePreview(path, result)];
-	},
-	renderStreamingFallback() {
-		return "";
-	},
-};
-
-interface ChunkArgs {
-	path?: string;
-	edits?: ChunkToolEdit[];
-	__partialJson?: string;
-}
-
-const chunkStrategy: EditStreamingStrategy<ChunkArgs> = {
-	extractCompleteEdits(args, partialJson) {
-		if (!args?.edits) return args;
-		let edits = dropIncompleteLastEdit(args.edits, partialJson, "edits");
-		// Extra guard: if partial JSON still contains `":nu` / `":nul` (partial
-		// `null` literals), `partial-json` may have already surfaced the last
-		// entry with `write === null`. When that entry's `}` hasn't closed
-		// yet, it has already been dropped above. But if dropping was not
-		// triggered (e.g. list still open and no new `{` after), also drop the
-		// trailing null-write entry so the preview does not flicker with an
-		// error for an incomplete string/null literal.
-		if (partialJson && edits.length > 0) {
-			const last = edits[edits.length - 1] as Partial<ChunkToolEdit> | undefined;
-			const endsInPartialNull = /:\s*nu?l?\s*$/.test(partialJson.trimEnd());
-			if (last && endsInPartialNull && last.write === null) {
-				edits = edits.slice(0, -1);
-			}
-		}
-		return { ...args, edits };
-	},
-	async computeDiffPreview(args, ctx) {
-		const edits = args.edits ?? [];
-		if (edits.length === 0) return null;
-		// Group edits by file path
-		const groups = new Map<string, ChunkToolEdit[]>();
-		const fileOrder: string[] = [];
-		for (const edit of edits) {
-			if (!edit) continue;
-			const editPath = edit.path ?? args.path;
-			if (!editPath) continue;
-			const { filePath } = parseChunkEditPath(editPath);
-			if (!filePath) continue;
-			let bucket = groups.get(filePath);
-			if (!bucket) {
-				bucket = [];
-				groups.set(filePath, bucket);
-				fileOrder.push(filePath);
-			}
-			bucket.push({ ...edit, path: editPath });
-		}
-		if (fileOrder.length === 0) return null;
-
-		const MAX_FILES = 5;
-		const selected = fileOrder.slice(0, MAX_FILES);
+		const groups = groupEditsByPath(args.edits ?? [], args.path);
+		if (groups.size === 0) return null;
 		const previews: PerFileDiffPreview[] = [];
-		for (const filePath of selected) {
+		for (const [path, fileEdits] of groups) {
 			ctx.signal.throwIfAborted();
-			const fileEdits = groups.get(filePath) ?? [];
-			const result = await computeChunkDiff({ path: filePath, edits: fileEdits }, ctx.cwd, { signal: ctx.signal });
-			previews.push(toPerFilePreview(filePath, result));
+			const result = await computeHashlineDiff({ path, edits: fileEdits }, ctx.cwd);
+			ctx.signal.throwIfAborted();
+			previews.push(toPerFilePreview(path, result));
 		}
 		return previews;
 	},
@@ -311,16 +282,22 @@ const applyPatchStrategy: EditStreamingStrategy<ApplyPatchArgs> = {
 				return [{ path: "", error: err instanceof Error ? err.message : String(err) }];
 			}
 		}
-		const first = entries[0];
-		if (!first?.path) return null;
-		ctx.signal.throwIfAborted();
-		const result = await computePatchDiff(
-			{ path: first.path, op: first.op ?? "update", rename: first.rename, diff: first.diff },
-			ctx.cwd,
-			{ fuzzyThreshold: ctx.fuzzyThreshold, allowFuzzy: ctx.allowFuzzy },
-		);
-		ctx.signal.throwIfAborted();
-		return [toPerFilePreview(first.path, result)];
+		const groups = groupEditsByPath(entries, undefined);
+		if (groups.size === 0) return null;
+		const previews: PerFileDiffPreview[] = [];
+		for (const [path, fileEntries] of groups) {
+			const first = fileEntries[0];
+			if (!first) continue;
+			ctx.signal.throwIfAborted();
+			const result = await computePatchDiff(
+				{ path, op: first.op ?? "update", rename: first.rename, diff: first.diff },
+				ctx.cwd,
+				{ fuzzyThreshold: ctx.fuzzyThreshold, allowFuzzy: ctx.allowFuzzy },
+			);
+			ctx.signal.throwIfAborted();
+			previews.push(toPerFilePreview(path, result));
+		}
+		return previews.length > 0 ? previews : null;
 	},
 	renderStreamingFallback() {
 		return "";
@@ -365,7 +342,6 @@ export const EDIT_MODE_STRATEGIES: Record<EditMode, EditStreamingStrategy<unknow
 	replace: replaceStrategy as EditStreamingStrategy<unknown>,
 	patch: patchStrategy as EditStreamingStrategy<unknown>,
 	hashline: hashlineStrategy as EditStreamingStrategy<unknown>,
-	chunk: chunkStrategy as EditStreamingStrategy<unknown>,
 	apply_patch: applyPatchStrategy as EditStreamingStrategy<unknown>,
 	vim: vimStrategy,
 	atom: atomStrategy as EditStreamingStrategy<unknown>,
