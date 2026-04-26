@@ -50,6 +50,9 @@ export interface EditToolPerFileResult {
 	move?: string;
 	isError?: boolean;
 	errorText?: string;
+	/** TUI-friendly error text. When present, rendered to the user instead of `errorText`.
+	 * Set when the underlying error carries a `displayMessage` (e.g. {@link HashlineMismatchError}). */
+	displayErrorText?: string;
 	meta?: OutputMeta;
 }
 
@@ -377,18 +380,18 @@ function wrapEditRendererLine(line: string, width: number): string[] {
 	const startAnsi = line.match(/^((?:\x1b\[[0-9;]*m)*)/)?.[1] ?? "";
 	const bodyWithReset = line.slice(startAnsi.length);
 	const body = bodyWithReset.endsWith("\x1b[39m") ? bodyWithReset.slice(0, -"\x1b[39m".length) : bodyWithReset;
-	const diffMatch = /^([+\-\s])(\s*\d+)\|(.*)$/s.exec(body);
+	const diffMatch = /^([+\-\s])(\s*\d+)([|│])(.*)$/s.exec(body);
 
 	if (!diffMatch) {
 		return wrapTextWithAnsi(line, width);
 	}
 
-	const [, marker, lineNum, content] = diffMatch;
-	const prefix = `${marker}${lineNum}|`;
+	const [, marker, lineNum, separator, content] = diffMatch;
+	const prefix = `${marker}${lineNum}${separator}`;
 	const prefixWidth = visibleWidth(prefix);
 	const contentWidth = Math.max(1, width - prefixWidth);
-	const continuationPrefix = `${" ".repeat(Math.max(0, prefixWidth - 1))}|`;
-	const wrappedContent = wrapTextWithAnsi(content, contentWidth);
+	const continuationPrefix = `${" ".repeat(Math.max(0, prefixWidth - 1))}${separator}`;
+	const wrappedContent = wrapTextWithAnsi(content ?? "", contentWidth);
 
 	return wrappedContent.map(
 		(segment, index) => `${startAnsi}${index === 0 ? prefix : continuationPrefix}${segment}\x1b[39m`,
@@ -493,8 +496,10 @@ function renderSingleFileResult(
 	const metadataLineCount = editTextSource ? countLines(editTextSource) : null;
 	const metadataLine = op !== "delete" ? `\n${formatMetadataLine(metadataLineCount, language, uiTheme)}` : "";
 
+	const displayErrorText = isError && details && "displayErrorText" in details ? details.displayErrorText : undefined;
 	const errorText = isError
-		? (details && "errorText" in details && details.errorText) ||
+		? displayErrorText ||
+			(details && "errorText" in details && details.errorText) ||
 			(result.content?.find(c => c.type === "text")?.text ?? "")
 		: "";
 

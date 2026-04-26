@@ -1,96 +1,87 @@
-Applies precise file edits using `LINE#ID` anchors from `read` output.
+Applies precise file edits using full anchors from `read` output (for example `160sr`).
 
-Most ops reference **exactly one** anchor. The exception is `set: [openAnchor, closeAnchor]` (a 2-tuple), which addresses the lines **strictly between** two anchors that both **survive** the edit — use it for block-body replacement (e.g. "replace the body of this function, keep the braces").
-
-Read the file first. Copy anchors exactly from the latest `read` output. After any successful edit, re-read before editing that file again.
+Read the file first. Copy the full anchors exactly as shown by `read`.
 
 <operations>
-**Top level**
-- `edits` — array of edit entries. Each entry is exactly one op.
-- `path` (optional) — default file path used when an edit omits its own `path`. Lets you share the path across many edits in one request.
+**Top level**: `{ path, edits: […] }` — `path` is shared by all entries. You may still override the file inside `loc` with forms like `other.ts:160sr`.
 
-`{ path?, … }` — one of the following ops:
-- `set: "55#th", lines: […]` — replace one anchored line with one or more lines
-- `set: ["5#aa", "9#bb"], lines: […]` — replace **only** the lines strictly between the two anchors. Both anchor lines are kept untouched. Use this for block bodies: the first element is the opening anchor (e.g. `function foo() {`), the second is the closing anchor (e.g. `}`). The braces stay; only the body is rewritten. **Never include the anchor lines in `lines`.** The 2-tuple form is **exclusive** — it is *not* an inclusive `[start, end]` range.
-- `before: "55#th", lines: […]` — insert lines above the anchored line
-- `after:  "55#th", lines: […]` — insert lines below the anchored line
-- `del: "55#th"` — delete one anchored line
-- `sub: "55#th", find: "…", lines: …` — replace a unique substring on the anchored line
-- `ins: "55#th", find: "…", lines: "…"` — overwrite from the start of `find` to **end-of-line** with `lines`. Everything on the anchored line after (and including) `find` is **discarded**. If you want to preserve trailing content, use `sub` instead.
-- `append: […]` — append at end of file
-- `prepend: …` — prepend at start of file
+Each entry has one shared locator plus one or more verbs:
+- `loc: "160sr"` — single anchored line
+- `loc: "^"` — beginning of file (only valid with `pre`)
+- `loc: "$"` — end of file (only valid with `post`)
+- `loc: "a.ts:160sr"` — cross-file override inside the locator
 
-**Minimum content rule for `sub` and `ins`**: `find` must occur exactly once on the anchored line. Use the **shortest** unique fragment — not the whole line. The replacement `lines` should also be the smallest change that does the job. Restating large amounts of unchanged text is wasted output and increases the chance of stale-line conflicts.
+Verbs:
+- `set: ["…"]` — replace the anchor line
+- `pre: ["…"]` — insert before the anchor line (or at BOF when `loc:"^"`)
+- `post: ["…"]` — insert after the anchor line (or at EOF when `loc:"$"`)
+- `sed: "s/foo/bar/"` — sed-style substitution applied to the anchor line. **Prefer this over `set` for token-level changes**
+Flags: `g` (all occurrences), `i` (case-insensitive), `F` (literal/fixed-string, no regex).
+Delimiter is whatever character follows `s`.
+You **MUST** keep the pattern as short as possible.
 
-**File-scoped ops**
-
-**Path resolution**: each entry uses its own `path` if present, otherwise falls back to the request-level `path`. Provide one or the other; if neither is set, the edit is rejected.
+Combination rules:
+- On a single-anchor `loc`, you may combine `pre`, `set`, and `post` in the same entry.
+- `set: []` on a single-anchor `loc` deletes that line.
+- `set:[""]` is **not** delete — it replaces the line with a blank line.
 </operations>
 
 <examples>
 All examples below reference the same file:
 
 ```ts title="a.ts"
-{{hline  1 "// @ts-ignore"}}
-{{hline  2 "const timeout = 5000;"}}
-{{hline  3 "const tag = \"DO NOT SHIP\";"}}
-{{hline  4 ""}}
-{{hline  5 "function alpha() {"}}
-{{hline  6 "\tlog();"}}
-{{hline  7 "}"}}
-{{hline  8 ""}}
-{{hline  9 "function beta() {"}}
-{{hline 10 "\t// TODO: remove after migration"}}
-{{hline 11 "\tlegacy();"}}
-{{hline 12 "\ttry {"}}
-{{hline 13 "\t\treturn parse(data);"}}
-{{hline 14 "\t} catch (err) {"}}
-{{hline 15 "\t\tconsole.error(err);"}}
-{{hline 16 "\t\treturn null;"}}
-{{hline 17 "\t}"}}
-{{hline 18 "}"}}
+{{hline 1 "const tag = \"BAD\";"}}
+{{hline 2 ""}}
+{{hline 3 "function beta(x) {"}}
+{{hline 4 "\tif (x) {"}}
+{{hline 5 "\t\treturn parse(data) || fallback;"}}
+{{hline 6 "\t}"}}
+{{hline 7 "\treturn null;"}}
+{{hline 8 "}"}}
 ```
 
-# Replace one line
-`{edits:[{path:"a.ts",set:{{href 2 "const timeout = 5000;"}},lines:"const timeout = 30_000;"}]}`
-# Rewrite a single token (cheaper than `set`)
-`sub` rewrites a substring without repeating the rest of the line.
-`{edits:[{path:"a.ts",sub:{{href 2 "const timeout = 5000;"}},find:"5000",lines:"30_000"}]}`
-# Truncate a line tail with `ins` (vim-insert)
-Use `ins` when the change is “replace from this point onward.” Pick the shortest unique anchor.
-Original line 3: `const tag = "DO NOT SHIP";`
-`{edits:[{path:"a.ts",ins:{{href 3 "const tag = \"DO NOT SHIP\";"}},find:"DO",lines:"OK\";"}]}`
-Result: `const tag = "OK";`. `find:"DO"` positions the cursor at `D`; everything from there to end-of-line is replaced by `lines`.
-# Replace a block body, keep the surrounding braces (preferred multi-line edit)
-Anchors mark *survivors*. With `set: [open, close]` the two named lines are kept; lines strictly between them are replaced by `lines`.
-Replace the body of `alpha` (line 6) while keeping `function alpha() {` (5) and `}` (7):
-`{edits:[{path:"a.ts",set:[{{href 5 "function alpha() {"}},{{href 7 "}"}}],lines:["\tvalidate();","\tlog();","\tcleanup();"]}]}`
-Replace just the catch body (lines 15–16), keeping `} catch (err) {` (14) and the closing `}` (17):
-`{edits:[{path:"a.ts",set:[{{href 14 "\t} catch (err) {"}},{{href 17 "\t}"}}],lines:["\t\tif (isEnoent(err)) return null;","\t\tthrow err;"]}]}`
-# Replace a multi-line block with per-line `set` (when there is no convenient pair of surviving anchors)
-One `set` per line — use this when the lines are mid-block and you do not want to introduce surrounding anchors. Lift `path` to the top level when all entries target the same file:
-`{path:"a.ts",edits:[{set:{{href 15 "\t\tconsole.error(err);"}},lines:"\t\tif (isEnoent(err)) return null;"},{set:{{href 16 "\t\treturn null;"}},lines:"\t\tthrow err;"}]}`
-Or per-entry `path` (use when edits span multiple files):
-`{edits:[{path:"a.ts",set:{{href 15 "\t\tconsole.error(err);"}},lines:"\t\tif (isEnoent(err)) return null;"},{path:"b.ts",set:{{href 16 "\t\treturn null;"}},lines:"\t\tthrow err;"}]}`
-# Delete adjacent lines (issue one `del` per line)
-`{path:"a.ts",edits:[{del:{{href 10 "\t// TODO: remove after migration"}}},{del:{{href 11 "\tlegacy();"}}}]}`
-# Insert before a sibling
-`{edits:[{path:"a.ts",before:{{href 9 "function beta() {"}},lines:["function gamma() {","\tvalidate();","}",""]}]}`
-# Insert after a line
-`{edits:[{path:"a.ts",after:{{href 6 "\tlog();"}},lines:["\tvalidate();"]}]}`
-# Expand one line into many
-`set` accepts an array.
-`{edits:[{path:"a.ts",set:{{href 6 "\tlog();"}},lines:["\tvalidate();","\tlog();","\tcleanup();"]}]}`
+# Replace a line with `set`
+`{path:"a.ts",edits:[{loc:{{href 1 "const tag = \"BAD\";"}},set:["const tag = \"OK\";"]}]}`
+
+# Combine `pre` + `set` + `post` in one entry
+`{path:"a.ts",edits:[{loc:{{href 4 "\tif (x) {"}},pre:["\tvalidate();"],set:["\tif (!x) {"],post:["\t\tlog();"]}]}`
+
+# Delete a line with `set: []`
+`{path:"a.ts",edits:[{loc:{{href 7 "\treturn null;"}},set:[]}]}`
+
+# Preserve a blank line with `set:[""]`
+`{path:"a.ts",edits:[{loc:{{href 2 ""}},set:[""]}]}`
+
+# Insert before / after a line
+`{path:"a.ts",edits:[{loc:{{href 3 "function beta(x) {"}},pre:["function gamma() {","\tvalidate();","}",""]}]}`
+
+# Substitute one token with `sed` (regex) — preferred for token-level edits
+Use the smallest pattern that uniquely identifies the change.
+`{path:"a.ts",edits:[{loc:{{href 5 "\t\treturn parse(data) || fallback;"}},sed:"s/\\|\\|/??/"}]}`
+
+# Substitute every occurrence with `sed` (literal/fixed-string)
+Use the `F` flag to disable regex; the delimiter can be any non-alphanumeric char.
+`{path:"a.ts",edits:[{loc:{{href 5 "\t\treturn parse(data) || fallback;"}},sed:"s|data|input|gF"}]}`
+
+# Prepend / append at file edges
+`{path:"a.ts",edits:[{loc:"^",pre:["// Copyright (c) 2026",""]}]}`
+`{path:"a.ts",edits:[{loc:"$",post:["","export const VERSION = \"1.0.0\";"]}]}`
+
+# Cross-file override inside `loc`
+`{path:"a.ts",edits:[{loc:"b.ts:{{href 1 "const tag = \"BAD\";"}}",set:["const tag = \"OK\";"]}]}`
 </examples>
 
 <critical>
-- Make the minimum exact edit. Do not rewrite nearby code unless the op requires it.
-- Each entry in `edits` is exactly one op. Never combine multiple ops in a single entry.
-- Copy anchors exactly as `N#ID` from the latest `read` output. Anchors validate the file hasn't changed since you read it; mismatches reject all ops in the request.
-- After **any** edit that changes line count (insert, multi-line `set`, `del`), all anchors below the change are stale. Re-read the file before issuing more edits to the same file. To reduce re-reads, batch edits in a single request and order them **bottom-up** so earlier edits don't shift later anchors.
-- For `sub`, the `find` substring must occur **exactly once** on the anchored line. If it could match more than once, use a longer substring or use `set` instead.
-- At most one of `set`/`del`/`sub` may target any single anchor line. `before`/`after` may coexist with them.
-- For 2-tuple `set: [open, close]`: open's line < close's line, the two anchors must be different lines, and **no other op in the same request may target a line strictly inside the region**. The two anchor lines themselves can still receive other ops (e.g. a `sub` on the closing-brace line is fine — it is preserved by the tuple-form `set`).
-- `lines` content must be literal file content with matching indentation. If the file uses tabs, use real tabs.
-- You **MUST NOT** use this tool to reformat or clean up unrelated code — use project-specific linters or code formatters instead.
+- Make the minimum exact edit.
+- Copy the full anchors exactly as shown by `read/grep` (for example `160sr`, not just `sr`).
+- `loc` chooses the target. Verbs describe what to do there.
+- On a single-anchor `loc`, you may combine `pre`, `set`, and `post`.
+- `loc:"^"` only supports `pre`. `loc:"$"` only supports `post`.
+- `set: []` deletes the anchored line. `set:[""]` preserves a blank line.
+- Within a single request you may submit edits in any order — the runtime applies them bottom-up so they don't shift each other. After any request that mutates a file, anchors below the mutation are stale on disk; re-read before issuing more edits to that file.
+- `set` operations target the current file content only. Do not try to reference old line text after the file has changed.
+- For token-level edits, prefer `sed` over `set`. The `loc` anchor already pins the line — repeating the entire line in a `set` array invites hallucinated content. Use the smallest `sed` pattern that uniquely identifies the change on that line; do not pad it with surrounding text just to feel safe.
+- When you do use `set`, re-read the anchored line first and copy it verbatim, changing only the required token(s). Anchor identity does not verify line content, so a hallucinated replacement will silently corrupt the file.
+- Text content must be literal file content with matching indentation. If the file uses tabs, use real tabs.
+- You **MUST NOT** use this tool to reformat or clean up unrelated code.
 </critical>

@@ -8,7 +8,7 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { getRemoteDir, prompt, readImageMetadata, untilAborted } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
-import { computeLineHash } from "../edit/line-hash";
+import { formatHashLines } from "../edit/line-hash";
 import {
 	type ChunkReadTarget,
 	formatChunkedRead,
@@ -89,19 +89,7 @@ function isRemoteMountPath(absolutePath: string): boolean {
 
 function prependLineNumbers(text: string, startNum: number): string {
 	const textLines = text.split("\n");
-	const lastLineNum = startNum + textLines.length - 1;
-	const padWidth = String(lastLineNum).length;
-	return textLines
-		.map((line, i) => {
-			const lineNum = String(startNum + i).padStart(padWidth, " ");
-			return `${lineNum}|${line}`;
-		})
-		.join("\n");
-}
-
-function prependHashLines(text: string, startNum: number): string {
-	const textLines = text.split("\n");
-	return textLines.map((line, i) => `${startNum + i}#${computeLineHash(startNum + i, line)}:${line}`).join("\n");
+	return textLines.map((line, i) => `${startNum + i}|${line}`).join("\n");
 }
 
 function formatTextWithMode(
@@ -110,7 +98,7 @@ function formatTextWithMode(
 	shouldAddHashLines: boolean,
 	shouldAddLineNumbers: boolean,
 ): string {
-	if (shouldAddHashLines) return prependHashLines(text, startNum);
+	if (shouldAddHashLines) return formatHashLines(text, startNum);
 	if (shouldAddLineNumbers) return prependLineNumbers(text, startNum);
 	return text;
 }
@@ -369,9 +357,9 @@ function prependSuffixResolutionNotice(text: string, suffixResolution?: { from: 
 }
 
 const readSchema = Type.Object({
-	path: Type.String({ description: "Path or URL to read" }),
-	sel: Type.Optional(Type.String({ description: "Selector" })),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds", default: 20 })),
+	path: Type.String({ description: "path or url", examples: ["src/foo.ts", "https://example.com"] }),
+	sel: Type.Optional(Type.String({ description: "line range or mode", examples: ["L50", "L50-L120", "raw"] })),
+	timeout: Type.Optional(Type.Number({ description: "timeout in seconds", default: 20 })),
 });
 
 export type ReadToolInput = Static<typeof readSchema>;
@@ -389,6 +377,10 @@ export interface ReadToolDetails {
 	method?: string;
 	notes?: string[];
 	meta?: OutputMeta;
+	/** Raw text + start line for user-visible TUI rendering, set when content is text-like.
+	 * Mirrors the same lines the model receives but without hashline/line-number prefixes,
+	 * so the TUI can render the file content with its own gutter without re-parsing the formatted text. */
+	displayContent?: { text: string; startLine: number };
 }
 
 type ReadParams = ReadToolInput;
@@ -641,8 +633,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		const shouldAddHashLines = displayMode.hashLines;
 		const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
-		const formatText = (content: string, startNum: number): string =>
-			formatTextWithMode(content, startNum, shouldAddHashLines, shouldAddLineNumbers);
+		const formatText = (content: string, startNum: number): string => {
+			details.displayContent = { text: content, startLine: startNum };
+			return formatTextWithMode(content, startNum, shouldAddHashLines, shouldAddLineNumbers);
+		};
 
 		let outputText: string;
 		let truncationInfo:
@@ -1253,7 +1247,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const isRawMode = parsed.kind === "raw";
 			const shouldAddHashLines = !isRawMode && displayMode.hashLines;
 			const shouldAddLineNumbers = isRawMode ? false : shouldAddHashLines ? false : displayMode.lineNumbers;
+			let capturedDisplayContent: { text: string; startLine: number } | undefined;
 			const formatText = (text: string, startNum: number): string => {
+				capturedDisplayContent = { text, startLine: startNum };
 				return formatTextWithMode(text, startNum, shouldAddHashLines, shouldAddLineNumbers);
 			};
 
@@ -1302,6 +1298,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				outputText = formatText(truncation.content, startLineDisplay);
 				details = {};
 				sourcePath = absolutePath;
+			}
+
+			if (capturedDisplayContent) {
+				details.displayContent = capturedDisplayContent;
 			}
 
 			content = [{ type: "text", text: outputText }];
@@ -1498,7 +1498,10 @@ export const readToolRenderer = {
 		}
 
 		const details = result.details;
-		const contentText = result.content?.find(c => c.type === "text")?.text ?? "";
+		const rawText = result.content?.find(c => c.type === "text")?.text ?? "";
+		// Prefer structured `displayContent` from details when available so the TUI
+		// shows clean file content (no model-only hashline anchors) without parsing the formatted text.
+		const contentText = details?.displayContent?.text ?? rawText;
 		const imageContent = result.content?.find(c => c.type === "image");
 		const rawPath = args?.file_path || args?.path || "";
 		const filePath = shortenPath(rawPath);

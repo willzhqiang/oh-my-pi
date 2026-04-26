@@ -955,7 +955,7 @@ export const SETTINGS_SCHEMA = {
 	// Edit tool
 	"edit.mode": {
 		type: "enum",
-		values: ["replace", "patch", "hashline", "chunk", "vim", "apply_patch"] as const,
+		values: ["replace", "patch", "hashline", "chunk", "vim", "apply_patch", "atom"] as const,
 		default: "hashline",
 		ui: {
 			tab: "editing",
@@ -1021,7 +1021,7 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "editing",
 			label: "Hash Lines",
-			description: "Include line hashes in read output for hashline edit mode (LINE#ID:content)",
+			description: "Include line hashes in read output for hashline edit mode (LINE+ID|content)",
 		},
 	},
 
@@ -1349,7 +1349,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "GitHub CLI",
 			description:
-				"Enable gh_* tools for GitHub repository, issue, pull request, diff, search, checkout, and PR push workflows",
+				"Enable the github tool (op-based dispatch for repository, issue, pull request, diff, search, checkout, push, and Actions watch workflows)",
 		},
 	},
 
@@ -1702,7 +1702,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"providers.image": {
 		type: "enum",
-		values: ["auto", "gemini", "openrouter"] as const,
+		values: ["auto", "openai", "gemini", "openrouter"] as const,
 		default: "auto",
 		ui: {
 			tab: "providers",

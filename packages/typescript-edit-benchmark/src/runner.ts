@@ -71,6 +71,8 @@ export interface BenchmarkConfig {
 	requireReadToolCall?: boolean;
 	noEditRequired?: boolean;
 	autoFormat?: boolean;
+	/** If true, abort the agent loop as soon as the formatted file content matches the expected fixture. Default: true. */
+	earlyStopOnMatch?: boolean;
 	editVariant?: string;
 	editFuzzy?: boolean | "auto";
 	editFuzzyThreshold?: number | "auto";
@@ -774,6 +776,8 @@ export interface TaskRunResult {
 	mutationIntentMatched?: boolean;
 	mutationIntentReason?: string;
 	timeoutTelemetry?: PromptAttemptTelemetry;
+	/** True when the run terminated early because the formatted file content matched the expected fixture. */
+	earlyStopped?: boolean;
 	/** Retry telemetry: how many retries of each type were used */
 	retryStats?: {
 		timeoutRetries: number;
@@ -829,6 +833,8 @@ export interface BenchmarkSummary {
 	totalProviderFailureRetries: number;
 	/** Runs where the 0/0/0 ghost signature was detected (0 tokens, 0 tool calls) */
 	ghostRuns: number;
+	/** Runs excluded because provider/transport stalls exhausted retries (subset of ghostRuns when error matches). */
+	transportFailureRuns: number;
 	mutationIntentMatchRate?: number;
 	/** Hashline edit subtype totals — only when editVariant is hashline */
 	hashlineEditSubtypes?: Record<string, number>;
@@ -861,6 +867,34 @@ async function copyFixtures(task: EditTask, destDir: string): Promise<void> {
 	);
 }
 
+interface EarlyStopOptions {
+	check: () => Promise<boolean>;
+	onMatch: () => void | Promise<void>;
+}
+
+function buildEarlyStop(params: {
+	config: BenchmarkConfig;
+	cwd: string;
+	expectedDir: string;
+	files: string[];
+	logEvent: (event: unknown) => Promise<void>;
+	attempt: number;
+	onMatched: () => void;
+}): EarlyStopOptions | undefined {
+	if (params.config.earlyStopOnMatch === false) return undefined;
+	if (params.files.length === 0) return undefined;
+	return {
+		check: async () => {
+			const verification = await verifyExpectedFileSubset(params.expectedDir, params.cwd, params.files);
+			return verification.success;
+		},
+		onMatch: async () => {
+			params.onMatched();
+			await params.logEvent({ type: "early_stop", attempt: params.attempt, reason: "formatted_match" });
+		},
+	};
+}
+
 async function runSingleTask(
 	task: EditTask,
 	runIndex: number,
@@ -884,6 +918,7 @@ async function runSingleTask(
 	let editAutocorrectCount = 0;
 	let timeoutTelemetry: PromptAttemptTelemetry | undefined;
 	let mutationIntentValidation: MutationIntentValidation | null = null;
+	let earlyStoppedByMatch = false;
 	let conversationSnapshot: ConversationDumpSnapshot | undefined;
 	const toolStats = {
 		read: 0,
@@ -991,7 +1026,23 @@ async function runSingleTask(
 				const statsBefore = await client.getSessionStats();
 				let events: Array<{ type: string; [key: string]: unknown }>;
 				try {
-					events = await collectPromptEvents(client, delivery, config, logEvent);
+					events = await collectPromptEvents(
+						client,
+						delivery,
+						config,
+						logEvent,
+						buildEarlyStop({
+							config,
+							cwd,
+							expectedDir,
+							files: task.files,
+							logEvent,
+							attempt: attempt + 1,
+							onMatched: () => {
+								earlyStoppedByMatch = true;
+							},
+						}),
+					);
 				} catch (err) {
 					if (err instanceof PromptTurnLimitError) {
 						error = err.message;
@@ -1239,6 +1290,7 @@ async function runSingleTask(
 		mutationIntentMatched: mutationIntentValidation?.matched,
 		mutationIntentReason: mutationIntentValidation?.reason,
 		timeoutTelemetry,
+		earlyStopped: earlyStoppedByMatch || undefined,
 		retryStats: {
 			timeoutRetries: timeoutRetriesUsed,
 			zeroToolRetries,
@@ -1624,6 +1676,10 @@ async function collectPromptEvents(
 	delivery: BenchmarkPromptDelivery,
 	config: BenchmarkConfig,
 	logEvent: (event: unknown) => Promise<void>,
+	earlyStop?: {
+		check: () => Promise<boolean>;
+		onMatch: () => void | Promise<void>;
+	},
 ): Promise<Array<{ type: string; [key: string]: unknown }>> {
 	const events: Array<{ type: string; [key: string]: unknown }> = [];
 	let unsubscribe: (() => void) | undefined;
@@ -1638,6 +1694,8 @@ async function collectPromptEvents(
 	let timer: NodeJS.Timeout | undefined;
 	let settled = false;
 	let receivedFirstEvent = false;
+	let earlyStopTriggered = false;
+	let earlyStopChain: Promise<void> = Promise.resolve();
 
 	const connectionTimeout = config.connectionTimeout ?? 30_000;
 
@@ -1682,6 +1740,30 @@ async function collectPromptEvents(
 			);
 		};
 
+		const triggerEarlyStop = () => {
+			if (!earlyStop || earlyStopTriggered || settled) return;
+			earlyStopChain = earlyStopChain
+				.then(async () => {
+					if (earlyStopTriggered || settled) return;
+					let matched = false;
+					try {
+						matched = await earlyStop.check();
+					} catch {
+						return;
+					}
+					if (!matched || earlyStopTriggered || settled) return;
+					earlyStopTriggered = true;
+					try {
+						await earlyStop.onMatch();
+					} catch {
+						// Swallow callback errors; we still want to short-circuit.
+					}
+					client.abort?.();
+					resolveWait();
+				})
+				.catch(() => {});
+		};
+
 		// Start with the shorter connection timeout; upgrade to full timeout on first event
 		timer = setTimeout(fireTimeout, connectionTimeout);
 
@@ -1711,6 +1793,13 @@ async function collectPromptEvents(
 			}
 			if (typedEvent.type === "tool_execution_end") {
 				toolExecutionEnds += 1;
+			}
+			if (
+				typedEvent.type === "tool_execution_end" &&
+				!(typedEvent as { isError?: boolean }).isError &&
+				isMutationTool((typedEvent as { toolName?: unknown }).toolName)
+			) {
+				triggerEarlyStop();
 			}
 			if (typedEvent.type === "message_end") {
 				messageEnds += 1;
@@ -1765,6 +1854,14 @@ async function collectPromptEvents(
 			await client.prompt(delivery.message);
 		}
 	} catch (err) {
+		if (earlyStopTriggered) {
+			// Abort raised inside prompt(); the run already short-circuited successfully.
+			if (timer) {
+				clearTimeout(timer);
+			}
+			unsubscribe?.();
+			return events;
+		}
 		if (timer) {
 			clearTimeout(timer);
 		}
@@ -1796,10 +1893,19 @@ function diffTokenStats(
 	return { input, output, total };
 }
 
+function isTransportFailure(r: TaskRunResult): boolean {
+	if (r.success) return false;
+	const err = r.error ?? "";
+	// Provider/transport stalls retried until the cap was hit. These don't reflect
+	// edit-tool quality, so we exclude them from the score denominator.
+	return err.includes("Timeout exhausted");
+}
+
 function isGhostRun(r: TaskRunResult): boolean {
-	return (
-		!r.success && r.tokens.total === 0 && r.toolCalls.read === 0 && r.toolCalls.edit === 0 && r.toolCalls.write === 0
-	);
+	if (r.success) return false;
+	const noProgress =
+		r.tokens.total === 0 && r.toolCalls.read === 0 && r.toolCalls.edit === 0 && r.toolCalls.write === 0;
+	return noProgress || isTransportFailure(r);
 }
 
 function summarizeTaskRuns(task: EditTask, runs: TaskRunResult[]): TaskResult {
@@ -1994,6 +2100,7 @@ export async function runBenchmark(
 	const allRuns = taskResults.flatMap(t => t.runs);
 	const totalRuns = allRuns.length;
 	const ghostRuns = allRuns.filter(r => isGhostRun(r)).length;
+	const transportFailureRuns = allRuns.filter(r => isTransportFailure(r)).length;
 	const effectiveRuns = totalRuns - ghostRuns;
 	const nonGhostRuns = allRuns.filter(r => !isGhostRun(r));
 	const successfulRuns = allRuns.filter(r => r.success).length;
@@ -2102,6 +2209,7 @@ export async function runBenchmark(
 		totalZeroToolRetries,
 		totalProviderFailureRetries,
 		ghostRuns,
+		transportFailureRuns,
 		mutationIntentMatchRate,
 		hashlineEditSubtypes,
 		chunkEditSubtypes,

@@ -19,29 +19,31 @@ import { createFileRecorder } from "./file-recorder";
 import { formatMatchLine } from "./match-line-format";
 import { formatFullOutputReference, type OutputMeta } from "./output-meta";
 import {
-	combineSearchGlobs,
 	hasGlobPathChars,
 	normalizePathLikeInput,
 	parseSearchPath,
 	resolveMultiSearchPath,
 	resolveToCwd,
 } from "./path-utils";
-import { formatCount, formatEmptyMessage, formatErrorMessage, PREVIEW_LIMITS } from "./render-utils";
+import {
+	formatCodeFrameLine,
+	formatCount,
+	formatEmptyMessage,
+	formatErrorMessage,
+	PREVIEW_LIMITS,
+} from "./render-utils";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
 const grepSchema = Type.Object({
-	pattern: Type.String({ description: "Regex pattern to search for" }),
-	path: Type.Optional(Type.String({ description: "File or directory to search (default: cwd)" })),
-	glob: Type.Optional(Type.String({ description: "Filter files by glob pattern (e.g., '*.js')" })),
-	type: Type.Optional(Type.String({ description: "Filter by file type (e.g., js, py, rust)" })),
-	i: Type.Optional(Type.Boolean({ description: "Case-insensitive search", default: false })),
-	pre: Type.Optional(Type.Number({ description: "Lines of context before matches" })),
-	post: Type.Optional(Type.Number({ description: "Lines of context after matches" })),
-	multiline: Type.Optional(Type.Boolean({ description: "Enable multiline matching" })),
-	gitignore: Type.Optional(Type.Boolean({ description: "Respect .gitignore files during search", default: true })),
-	limit: Type.Optional(Type.Number({ description: "Limit output to first N matches", default: 20 })),
-	offset: Type.Optional(Type.Number({ description: "Skip first N entries before applying limit", default: 0 })),
+	pattern: Type.String({ description: "regex pattern", examples: ["function\\s+\\w+", "TODO"] }),
+	path: Type.String({
+		description: "file, directory, glob, comma-separated paths, or internal URL to search",
+		examples: ["src/", "src/foo.ts", "src/**/*.ts"],
+	}),
+	i: Type.Optional(Type.Boolean({ description: "case-insensitive search", default: false })),
+	gitignore: Type.Optional(Type.Boolean({ description: "respect gitignore", default: true })),
+	skip: Type.Optional(Type.Number({ description: "matches to skip", default: 0 })),
 });
 
 export type GrepToolInput = Static<typeof grepSchema>;
@@ -61,6 +63,10 @@ export interface GrepToolDetails {
 	fileMatches?: Array<{ path: string; count: number }>;
 	truncated?: boolean;
 	error?: string;
+	/** Pre-formatted text for the user-visible TUI render. Mirrors the model-facing
+	 * `result.text` lines but uses a `│` gutter and `*` to mark match lines (vs space for
+	 * context). The TUI uses this directly so it never parses model-facing hashline anchors. */
+	displayContent?: string;
 }
 
 type GrepParams = Static<typeof grepSchema>;
@@ -88,7 +94,7 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 		_onUpdate?: AgentToolUpdateCallback<GrepToolDetails>,
 		_toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<GrepToolDetails>> {
-		const { pattern, path: searchDir, glob, type, i, gitignore, pre, post, multiline, limit, offset } = params;
+		const { pattern, path: searchDir, i, gitignore, skip } = params;
 
 		return untilAborted(signal, async () => {
 			const normalizedPattern = pattern.trim();
@@ -97,25 +103,16 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 				throw new ToolError("Pattern must not be empty");
 			}
 
-			const normalizedOffset = offset === undefined ? 0 : Number.isFinite(offset) ? Math.floor(offset) : Number.NaN;
-			if (normalizedOffset < 0 || !Number.isFinite(normalizedOffset)) {
-				throw new ToolError("Offset must be a non-negative number");
+			const normalizedSkip = skip === undefined ? 0 : Number.isFinite(skip) ? Math.floor(skip) : Number.NaN;
+			if (normalizedSkip < 0 || !Number.isFinite(normalizedSkip)) {
+				throw new ToolError("Skip must be a non-negative number");
 			}
-
-			const rawLimit = limit === undefined ? undefined : Number.isFinite(limit) ? Math.floor(limit) : Number.NaN;
-			if (rawLimit !== undefined && (!Number.isFinite(rawLimit) || rawLimit < 0)) {
-				throw new ToolError("Limit must be a non-negative number");
-			}
-			const normalizedLimit = rawLimit !== undefined && rawLimit > 0 ? rawLimit : undefined;
-
-			const defaultContextBefore = this.session.settings.get("grep.contextBefore");
-			const defaultContextAfter = this.session.settings.get("grep.contextAfter");
-			const normalizedContextBefore = pre ?? defaultContextBefore;
-			const normalizedContextAfter = post ?? defaultContextAfter;
+			const normalizedContextBefore = this.session.settings.get("grep.contextBefore");
+			const normalizedContextAfter = this.session.settings.get("grep.contextAfter");
 			const ignoreCase = i ?? false;
 			const useGitignore = gitignore ?? true;
 			const patternHasNewline = normalizedPattern.includes("\n") || normalizedPattern.includes("\\n");
-			const effectiveMultiline = multiline ?? patternHasNewline;
+			const effectiveMultiline = patternHasNewline;
 
 			const useHashLines = resolveFileDisplayMode(this.session).hashLines;
 			const formatScopePath = (targetPath: string): string => {
@@ -125,41 +122,36 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 			let searchPath: string;
 			let scopePath: string;
 			let exactFilePaths: string[] | undefined;
-			let globFilter = glob ? normalizePathLikeInput(glob) || undefined : undefined;
-			const internalRouter = this.session.internalRouter;
-			if (searchDir?.trim()) {
-				const rawPath = normalizePathLikeInput(searchDir);
-				if (internalRouter?.canHandle(rawPath)) {
-					if (hasGlobPathChars(rawPath)) {
-						throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPath}`);
-					}
-					const resource = await internalRouter.resolve(rawPath);
-					if (!resource.sourcePath) {
-						throw new ToolError(`Cannot grep internal URL without a backing file: ${rawPath}`);
-					}
-					searchPath = resource.sourcePath;
-					scopePath = formatScopePath(searchPath);
-				} else {
-					const multiSearchPath = await resolveMultiSearchPath(rawPath, this.session.cwd, globFilter);
-					if (multiSearchPath) {
-						searchPath = multiSearchPath.basePath;
-						globFilter = multiSearchPath.exactFilePaths ? undefined : multiSearchPath.glob;
-						exactFilePaths = multiSearchPath.exactFilePaths;
-						scopePath = multiSearchPath.scopePath;
-					} else {
-						const parsedPath = parseSearchPath(rawPath);
-						searchPath = resolveToCwd(parsedPath.basePath, this.session.cwd);
-						if (parsedPath.glob) {
-							globFilter = combineSearchGlobs(parsedPath.glob, globFilter);
-						}
-						scopePath = formatScopePath(searchPath);
-					}
-				}
-			} else {
-				searchPath = resolveToCwd(".", this.session.cwd);
-				scopePath = ".";
+			let globFilter: string | undefined;
+			const rawPath = normalizePathLikeInput(searchDir);
+			if (rawPath.length === 0) {
+				throw new ToolError("`path` must be a non-empty path or glob");
 			}
-
+			const internalRouter = this.session.internalRouter;
+			if (internalRouter?.canHandle(rawPath)) {
+				if (hasGlobPathChars(rawPath)) {
+					throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPath}`);
+				}
+				const resource = await internalRouter.resolve(rawPath);
+				if (!resource.sourcePath) {
+					throw new ToolError(`Cannot grep internal URL without a backing file: ${rawPath}`);
+				}
+				searchPath = resource.sourcePath;
+				scopePath = formatScopePath(searchPath);
+			} else {
+				const multiSearchPath = await resolveMultiSearchPath(rawPath, this.session.cwd, globFilter);
+				if (multiSearchPath) {
+					searchPath = multiSearchPath.basePath;
+					globFilter = multiSearchPath.exactFilePaths ? undefined : multiSearchPath.glob;
+					exactFilePaths = multiSearchPath.exactFilePaths;
+					scopePath = multiSearchPath.scopePath;
+				} else {
+					const parsedPath = parseSearchPath(rawPath);
+					searchPath = resolveToCwd(parsedPath.basePath, this.session.cwd);
+					globFilter = parsedPath.glob;
+					scopePath = formatScopePath(searchPath);
+				}
+			}
 			let isDirectory: boolean;
 			try {
 				const stat = await Bun.file(searchPath).stat();
@@ -170,7 +162,7 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 			}
 
 			const effectiveOutputMode = GrepOutputMode.Content;
-			const effectiveLimit = normalizedLimit ?? DEFAULT_MATCH_LIMIT;
+			const effectiveLimit = DEFAULT_MATCH_LIMIT;
 			const internalLimit = Math.min(effectiveLimit * 5, 2000);
 
 			// Run grep
@@ -184,7 +176,6 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 							{
 								pattern: normalizedPattern,
 								path: exactFilePath,
-								type: type?.trim() || undefined,
 								ignoreCase,
 								multiline: effectiveMultiline,
 								hidden: true,
@@ -201,7 +192,7 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 						const relativeFilePath = path.relative(searchPath, exactFilePath).replace(/\\/g, "/");
 						matches.push(...fileResult.matches.map(match => ({ ...match, path: relativeFilePath })));
 					}
-					const offsetMatches = matches.slice(normalizedOffset);
+					const offsetMatches = matches.slice(normalizedSkip);
 					result = {
 						matches: offsetMatches,
 						totalMatches: offsetMatches.length,
@@ -215,14 +206,13 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 							pattern: normalizedPattern,
 							path: searchPath,
 							glob: globFilter,
-							type: type?.trim() || undefined,
 							ignoreCase,
 							multiline: effectiveMultiline,
 							hidden: true,
 							gitignore: useGitignore,
 							cache: false,
 							maxCount: internalLimit,
-							offset: normalizedOffset > 0 ? normalizedOffset : undefined,
+							offset: normalizedSkip > 0 ? normalizedSkip : undefined,
 							contextBefore: normalizedContextBefore,
 							contextAfter: normalizedContextAfter,
 							maxColumns: DEFAULT_MAX_COLUMN,
@@ -281,6 +271,8 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 				? roundRobinSelect(result.matches, effectiveLimit)
 				: result.matches.slice(0, effectiveLimit);
 			const matchLimitReached = result.matches.length > effectiveLimit;
+			const nextSkip = normalizedSkip + selectedMatches.length;
+			const limitMessage = `Result limit reached; narrow path or use skip=${nextSkip}.`;
 			const { record: recordFile, list: fileList } = createFileRecorder();
 			const fileMatchCounts = new Map<string, number>();
 			if (selectedMatches.length === 0) {
@@ -333,7 +325,6 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 					if (fileMatches.length === 0) {
 						return renderedLines;
 					}
-					const lineWidth = fileMatches[0]?.fileLineCount.toString().length ?? 1;
 					const matchesByChunk = new Map<string, ChunkedGrepMatch[]>();
 					for (const match of fileMatches) {
 						const chunkKey = match.chunkPath ?? "";
@@ -352,7 +343,7 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 							renderedLines.push(anchor);
 						}
 						for (const match of chunkMatches) {
-							renderedLines.push(`    ${match.lineNumber.toString().padStart(lineWidth, " ")} |${match.line}`);
+							renderedLines.push(`    ${match.lineNumber}|${match.line}`);
 							fileMatchCounts.set(relativePath, (fileMatchCounts.get(relativePath) ?? 0) + 1);
 						}
 					}
@@ -398,6 +389,9 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 						outputLines.push(...renderChunkedMatchesForFile(relativePath));
 					}
 				}
+				if (matchLimitReached || result.limitReached) {
+					outputLines.push("", limitMessage);
+				}
 				const rawOutput = outputLines.join("\n");
 				const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
 				const truncated = Boolean(matchLimitReached || result.limitReached || truncation.truncated);
@@ -415,52 +409,49 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 					resultLimitReached: result.limitReached ? internalLimit : undefined,
 				};
 				if (truncation.truncated) details.truncation = truncation;
-				const resultBuilder = toolResult(details)
-					.text(truncation.content)
-					.limits({
-						matchLimit: matchLimitReached ? effectiveLimit : undefined,
-						resultLimit: result.limitReached ? internalLimit : undefined,
-					});
+				const resultBuilder = toolResult(details).text(truncation.content);
 				if (truncation.truncated) {
 					resultBuilder.truncation(truncation, { direction: "head" });
 				}
 				return resultBuilder.done();
 			}
-			const renderMatchesForFile = (relativePath: string): string[] => {
-				const renderedLines: string[] = [];
+			const displayLines: string[] = [];
+			const renderMatchesForFile = (relativePath: string): { model: string[]; display: string[] } => {
+				const modelOut: string[] = [];
+				const displayOut: string[] = [];
 				const fileMatches = matchesByFile.get(relativePath) ?? [];
+				const lineNumberWidth = fileMatches.reduce((width, match) => {
+					let nextWidth = Math.max(width, String(match.lineNumber).length);
+					for (const ctx of match.contextBefore ?? []) {
+						nextWidth = Math.max(nextWidth, String(ctx.lineNumber).length);
+					}
+					for (const ctx of match.contextAfter ?? []) {
+						nextWidth = Math.max(nextWidth, String(ctx.lineNumber).length);
+					}
+					return nextWidth;
+				}, 0);
 				for (const match of fileMatches) {
-					const lineNumbers: number[] = [match.lineNumber];
+					const pushLine = (lineNumber: number, line: string, isMatch: boolean) => {
+						modelOut.push(formatMatchLine(lineNumber, line, isMatch, { useHashLines }));
+						displayOut.push(formatCodeFrameLine(isMatch ? "*" : " ", lineNumber, line, lineNumberWidth));
+					};
 					if (match.contextBefore) {
 						for (const ctx of match.contextBefore) {
-							lineNumbers.push(ctx.lineNumber);
+							pushLine(ctx.lineNumber, ctx.line, false);
 						}
 					}
-					if (match.contextAfter) {
-						for (const ctx of match.contextAfter) {
-							lineNumbers.push(ctx.lineNumber);
-						}
-					}
-					const lineWidth = Math.max(...lineNumbers.map(value => value.toString().length));
-					const formatLine = (lineNumber: number, line: string, isMatch: boolean): string =>
-						formatMatchLine(lineNumber, line, isMatch, { useHashLines, lineWidth });
-					if (match.contextBefore) {
-						for (const ctx of match.contextBefore) {
-							renderedLines.push(formatLine(ctx.lineNumber, ctx.line, false));
-						}
-					}
-					renderedLines.push(formatLine(match.lineNumber, match.line, true));
+					pushLine(match.lineNumber, match.line, true);
 					if (match.truncated) {
 						linesTruncated = true;
 					}
 					if (match.contextAfter) {
 						for (const ctx of match.contextAfter) {
-							renderedLines.push(formatLine(ctx.lineNumber, ctx.line, false));
+							pushLine(ctx.lineNumber, ctx.line, false);
 						}
 					}
 					fileMatchCounts.set(relativePath, (fileMatchCounts.get(relativePath) ?? 0) + 1);
 				}
-				return renderedLines;
+				return { model: modelOut, display: displayOut };
 			};
 			if (isDirectory) {
 				const filesByDirectory = new Map<string, string[]>();
@@ -474,36 +465,47 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 				for (const [directory, directoryFiles] of filesByDirectory) {
 					if (directory === ".") {
 						for (const relativePath of directoryFiles) {
-							const renderedLines = renderMatchesForFile(relativePath);
-							if (renderedLines.length === 0) continue;
+							const rendered = renderMatchesForFile(relativePath);
+							if (rendered.model.length === 0) continue;
 							if (outputLines.length > 0) {
 								outputLines.push("");
+								displayLines.push("");
 							}
-							outputLines.push(`# ${path.basename(relativePath)}`);
-							outputLines.push(...renderedLines);
+							const header = `# ${path.basename(relativePath)}`;
+							outputLines.push(header, ...rendered.model);
+							displayLines.push(header, ...rendered.display);
 						}
 						continue;
 					}
 					const renderedFiles = directoryFiles
-						.map(relativePath => ({ relativePath, lines: renderMatchesForFile(relativePath) }))
-						.filter(file => file.lines.length > 0);
+						.map(relativePath => ({ relativePath, rendered: renderMatchesForFile(relativePath) }))
+						.filter(file => file.rendered.model.length > 0);
 					if (renderedFiles.length === 0) continue;
 					if (outputLines.length > 0) {
 						outputLines.push("");
+						displayLines.push("");
 					}
-					outputLines.push(`# ${directory}`);
-					for (const { relativePath, lines } of renderedFiles) {
-						outputLines.push(`## └─ ${path.basename(relativePath)}`);
-						outputLines.push(...lines);
+					const dirHeader = `# ${directory}`;
+					outputLines.push(dirHeader);
+					displayLines.push(dirHeader);
+					for (const { relativePath, rendered } of renderedFiles) {
+						const fileHeader = `## └─ ${path.basename(relativePath)}`;
+						outputLines.push(fileHeader, ...rendered.model);
+						displayLines.push(fileHeader, ...rendered.display);
 					}
 				}
 			} else {
 				for (const relativePath of fileList) {
-					outputLines.push(...renderMatchesForFile(relativePath));
+					const rendered = renderMatchesForFile(relativePath);
+					outputLines.push(...rendered.model);
+					displayLines.push(...rendered.display);
 				}
 			}
 			if (hasContextLines && outputLines.length > 0) {
-				outputLines.unshift("[grep] match lines use ':'; context lines use '-'.");
+				outputLines.unshift("[grep] match lines use '>'; context lines use ':'.");
+			}
+			if (matchLimitReached || result.limitReached) {
+				outputLines.push("", limitMessage);
 			}
 			const rawOutput = outputLines.join("\n");
 			const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
@@ -521,16 +523,13 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 				truncated,
 				matchLimitReached: matchLimitReached ? effectiveLimit : undefined,
 				resultLimitReached: result.limitReached ? internalLimit : undefined,
+				displayContent: displayLines.join("\n"),
 			};
 			if (truncation.truncated) details.truncation = truncation;
 			if (linesTruncated) details.linesTruncated = true;
 			const resultBuilder = toolResult(details)
 				.text(output)
-				.limits({
-					matchLimit: matchLimitReached ? effectiveLimit : undefined,
-					resultLimit: result.limitReached ? internalLimit : undefined,
-					columnMax: linesTruncated ? DEFAULT_MAX_COLUMN : undefined,
-				});
+				.limits({ columnMax: linesTruncated ? DEFAULT_MAX_COLUMN : undefined });
 			if (truncation.truncated) {
 				resultBuilder.truncation(truncation, { direction: "head" });
 			}
@@ -546,15 +545,9 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 interface GrepRenderArgs {
 	pattern: string;
 	path?: string;
-	glob?: string;
-	type?: string;
 	i?: boolean;
 	gitignore?: boolean;
-	pre?: number;
-	post?: number;
-	multiline?: boolean;
-	limit?: number;
-	offset?: number;
+	skip?: number;
 }
 
 const COLLAPSED_TEXT_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
@@ -564,19 +557,9 @@ export const grepToolRenderer = {
 	renderCall(args: GrepRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const meta: string[] = [];
 		if (args.path) meta.push(`in ${args.path}`);
-		if (args.glob) meta.push(`glob:${args.glob}`);
-		if (args.type) meta.push(`type:${args.type}`);
 		if (args.i) meta.push("case:insensitive");
 		if (args.gitignore === false) meta.push("gitignore:false");
-		if (args.pre !== undefined && args.pre > 0) {
-			meta.push(`pre:${args.pre}`);
-		}
-		if (args.post !== undefined && args.post > 0) {
-			meta.push(`post:${args.post}`);
-		}
-		if (args.multiline) meta.push("multiline");
-		if (args.limit !== undefined && args.limit > 0) meta.push(`limit:${args.limit}`);
-		if (args.offset !== undefined && args.offset > 0) meta.push(`offset:${args.offset}`);
+		if (args.skip !== undefined && args.skip > 0) meta.push(`skip:${args.skip}`);
 
 		const text = renderStatusLine(
 			{ icon: "pending", title: "Grep", description: args.pattern || "?", meta },
@@ -601,7 +584,7 @@ export const grepToolRenderer = {
 		const hasDetailedData = details?.matchCount !== undefined || details?.fileCount !== undefined;
 
 		if (!hasDetailedData) {
-			const textContent = result.content?.find(c => c.type === "text")?.text;
+			const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text;
 			if (!textContent || textContent === "No matches found") {
 				return new Text(formatEmptyMessage("No matches found", uiTheme), 0, 0);
 			}
@@ -664,7 +647,7 @@ export const grepToolRenderer = {
 			uiTheme,
 		);
 
-		const textContent = result.content?.find(c => c.type === "text")?.text ?? "";
+		const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text ?? "";
 		const rawLines = textContent.split("\n");
 		const hasSeparators = rawLines.some(line => line.trim().length === 0);
 		const matchGroups: string[][] = [];
@@ -688,9 +671,11 @@ export const grepToolRenderer = {
 			}
 		}
 
+		const renderedMatchLimit = details?.matchLimitReached ?? limits?.matchLimit?.reached;
+		const renderedResultLimit = details?.resultLimitReached ?? limits?.resultLimit?.reached;
 		const truncationReasons: string[] = [];
-		if (limits?.matchLimit) truncationReasons.push(`limit ${limits.matchLimit.reached} matches`);
-		if (limits?.resultLimit) truncationReasons.push(`limit ${limits.resultLimit.reached} results`);
+		if (renderedMatchLimit) truncationReasons.push(`first ${renderedMatchLimit} matches`);
+		if (renderedResultLimit) truncationReasons.push(`first ${renderedResultLimit} results`);
 		if (truncation) truncationReasons.push(truncation.truncatedBy === "lines" ? "line limit" : "size limit");
 		if (limits?.columnTruncated) truncationReasons.push(`line length ${limits.columnTruncated.maxColumn}`);
 		if (truncation?.artifactId) truncationReasons.push(formatFullOutputReference(truncation.artifactId));

@@ -1,6 +1,6 @@
-Applies precise file edits using anchor-prefixed line references (e.g. `123#th`) from `read` output.
+Applies precise file edits using full anchors from `read` output (for example `160sr`).
 
-Read the file first. Copy anchors exactly from the latest `read` output. After any successful edit, re-read before editing that file again.
+Read the file first. Copy the full anchors exactly as shown by `read`.
 
 <operations>
 **Top level**
@@ -10,12 +10,12 @@ Read the file first. Copy anchors exactly from the latest `read` output. After a
 **Edit entry**: `{ path?, loc, content }`
 - `path` — file path (omit to fall back to the request-level `path`)
 - `loc` — where to apply the edit (see below)
-- `content` — replacement/inserted lines (array of strings preferred, `null` to delete)
+- `content` — replacement/inserted lines (`string[]`, one element per line; `null` to delete)
 
 **`loc` values**
 - `"append"` / `"prepend"` — insert at end/start of file
-- `{ append: "123#th" }` / `{ prepend: "123#th" }` — insert after/before anchored line
-- `{ range: { pos: "123#th", end: "123#th" } }` — replace inclusive range `pos..end` with new content (set `pos == end` for single-line replace)
+- `{ append: "123th" }` / `{ prepend: "123th" }` — insert after/before anchored line
+- `{ range: { pos: "123th", end: "123th" } }` — replace inclusive range `pos..end` with new content (set `pos == end` for single-line replace)
 </operations>
 
 <examples>
@@ -60,8 +60,8 @@ When adding a sibling declaration, prefer `prepend` on the next declaration.
 </examples>
 
 <critical>
-- Make the minimum exact edit. Do not rewrite nearby code unless the range requires it.
-- Copy anchors exactly as `N#ID` from the latest `read` output.
+- Make the minimum exact edit.
+- Copy the full anchors exactly as shown by `read/grep` (for example `160sr`, not just `sr`).
 - `range` requires both `pos` and `end`.
 - **Closing-delimiter check**: when your replacement `content` ends with a closing delimiter (`}`, `*/`, `)`, `]`), compare it against the line immediately after `end` in the file. If they match, extend `end` to include that line — otherwise the original delimiter survives and `content` adds a second copy.
 - For a range, replace only the body or the whole range — don't split range boundaries.

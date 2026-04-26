@@ -59,22 +59,21 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			Type.Object(
 				{
 					result: Type.Union([
-						Type.Object({ data: dataSchema }, { description: "Successfully completed the task" }),
+						Type.Object({ data: dataSchema }, { description: "task succeeded" }),
 						Type.Object({
-							error: Type.String({ description: "Error message when the task cannot be completed" }),
+							error: Type.String({ description: "error message" }),
 						}),
 					]),
 				},
 				{
 					additionalProperties: false,
-					description: "Submit either `data` for success or `error` for failure",
+					description: "submit data or error",
 				},
 			) as TSchema;
 
 		let validate: ValidateFunction | undefined;
 		let dataSchema: TSchema;
 		let parameters: TSchema;
-		let strict = true;
 
 		try {
 			const schemaResult = normalizeSchema(session.outputSchema);
@@ -131,12 +130,11 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			});
 			parameters = createParameters(dataSchema);
 			validate = undefined;
-			strict = false;
+			this.strict = false;
 		}
 
 		this.#validate = validate;
 		this.parameters = parameters;
-		this.strict = strict;
 	}
 
 	async execute(

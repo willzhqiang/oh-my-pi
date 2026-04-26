@@ -2,14 +2,17 @@
  * Hashline edit mode — a line-addressable edit format using text hashes.
  *
  * Each line in a file is identified by its 1-indexed line number and a short
- * BPE-bigram hash derived from the normalized line text (xxHash32 mod 40,
+ * BPE-bigram hash derived from the normalized line text (xxHash32 mod 647,
  * mapped through HASHLINE_BIGRAMS).
- * The combined `LINE#ID` reference acts as both an address and a staleness check:
+ * The combined `LINE+ID` reference acts as both an address and a staleness check:
  * if the file has changed since the caller last read it, hash mismatches are caught
  * before any mutation occurs.
  *
- * Displayed format: `LINENUM#HASH:TEXT`
- * Reference format: `"LINENUM#HASH"` (e.g. `"5#th"`)
+ * Displayed format: `LINE+ID|TEXT`
+ * Reference format: `"LINE+ID"` (e.g. `"1ab"`)
+ *
+ * In tool JSON, each edit's `content` is `string[]` (one string per logical line) or
+ * `null` to delete the targeted range.
  */
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
@@ -23,8 +26,9 @@ import { invalidateFsScanAfterWrite } from "../../tools/fs-cache-invalidation";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd } from "../../tools/path-utils";
 import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
+import { formatCodeFrameLine } from "../../tools/render-utils";
 import { generateDiffString } from "../diff";
-import { computeLineHash, formatLineHash, HASHLINE_BIGRAM_RE_SRC } from "../line-hash";
+import { computeLineHash, formatHashLine, HASHLINE_BIGRAM_RE_SRC, HASHLINE_CONTENT_SEPARATOR } from "../line-hash";
 import { detectLineEnding, normalizeToLF, restoreLineEndings, stripBom } from "../normalize";
 import type { EditToolDetails, LspBatchRequest } from "../renderer";
 
@@ -34,7 +38,7 @@ export interface HashMismatch {
 	actual: string;
 }
 
-export type Anchor = { line: number; hash: string };
+export type Anchor = { line: number; hash: string; contentHint?: string };
 export type HashlineEdit =
 	| { op: "replace_line"; pos: Anchor; lines: string[] }
 	| { op: "replace_range"; pos: Anchor; end: Anchor; lines: string[] }
@@ -43,15 +47,17 @@ export type HashlineEdit =
 	| { op: "append_file"; lines: string[] }
 	| { op: "prepend_file"; lines: string[] };
 
-const INLINE_LINE_NUM_RE = /^\s*\d+\s*\|/;
-// Tight prefix matchers. The bare `#BIGRAM:` form (no line number) intentionally
-// disallows whitespace between `#` and the bigram so real comments like `# th: ...`
-// or `# in: ...` (a `#`, a space, then a common English bigram) are not mistaken
-// for hashline anchors and stripped.
+// Tight prefix matchers for the new format `LINE+ID|content`. The pipe is the
+// canonical separator; legacy reads using `:` are tolerated for back-compat.
+// Line-number digits are mandatory.
+// Accept both `|` (canonical) and `:` (legacy) so re-reads of older outputs still parse.
+const HASHLINE_CONTENT_SEPARATOR_RE = "[:|]";
 const HASHLINE_PREFIX_RE = new RegExp(
-	`^\\s*(?:>>>|>>)?\\s*(?:\\+?\\s*\\d+\\s*#\\s*|\\+?#|\\+\\s*)${HASHLINE_BIGRAM_RE_SRC}:`,
+	`^\\s*(?:>>>|>>)?\\s*(?:\\+\\s*)?\\d+${HASHLINE_BIGRAM_RE_SRC}${HASHLINE_CONTENT_SEPARATOR_RE}`,
 );
-const HASHLINE_PREFIX_PLUS_RE = new RegExp(`^\\s*(?:>>>|>>)?\\s*\\+\\s*(?:\\d+\\s*#\\s*|#)?${HASHLINE_BIGRAM_RE_SRC}:`);
+const HASHLINE_PREFIX_PLUS_RE = new RegExp(
+	`^\\s*(?:>>>|>>)?\\s*\\+\\s*\\d+${HASHLINE_BIGRAM_RE_SRC}${HASHLINE_CONTENT_SEPARATOR_RE}`,
+);
 const DIFF_PLUS_RE = /^[+](?![+])/;
 const READ_TRUNCATION_NOTICE_RE = /^\[(?:Showing lines \d+-\d+ of \d+|\d+ more lines? in (?:file|\S+))\b.*\bsel=L\d+/;
 
@@ -61,12 +67,7 @@ type LinePrefixStats = {
 	diffPlusHashPrefixCount: number;
 	diffPlusCount: number;
 	truncationNoticeCount: number;
-	inlineLineNumCount: number;
 };
-
-function stripInlineLineNum(line: string): string {
-	return line.replace(INLINE_LINE_NUM_RE, "");
-}
 
 function collectLinePrefixStats(lines: string[]): LinePrefixStats {
 	const stats: LinePrefixStats = {
@@ -75,7 +76,6 @@ function collectLinePrefixStats(lines: string[]): LinePrefixStats {
 		diffPlusHashPrefixCount: 0,
 		diffPlusCount: 0,
 		truncationNoticeCount: 0,
-		inlineLineNumCount: 0,
 	};
 
 	for (const line of lines) {
@@ -84,22 +84,17 @@ function collectLinePrefixStats(lines: string[]): LinePrefixStats {
 			stats.truncationNoticeCount++;
 			continue;
 		}
-		const hasInlineNum = INLINE_LINE_NUM_RE.test(line);
-		const effective = hasInlineNum ? stripInlineLineNum(line) : line;
-		// A line like "  4|" is just a line-number prefix with no content — treat as empty.
-		if (effective.length === 0 && hasInlineNum) continue;
 		stats.nonEmpty++;
-		if (hasInlineNum) stats.inlineLineNumCount++;
-		if (HASHLINE_PREFIX_RE.test(effective)) stats.hashPrefixCount++;
-		if (HASHLINE_PREFIX_PLUS_RE.test(effective)) stats.diffPlusHashPrefixCount++;
-		if (DIFF_PLUS_RE.test(effective)) stats.diffPlusCount++;
+		if (HASHLINE_PREFIX_RE.test(line)) stats.hashPrefixCount++;
+		if (HASHLINE_PREFIX_PLUS_RE.test(line)) stats.diffPlusHashPrefixCount++;
+		if (DIFF_PLUS_RE.test(line)) stats.diffPlusCount++;
 	}
 
 	return stats;
 }
 
 function stripLeadingHashlinePrefixes(line: string): string {
-	let result = INLINE_LINE_NUM_RE.test(line) ? stripInlineLineNum(line) : line;
+	let result = line;
 	let prev: string;
 	do {
 		prev = result;
@@ -113,26 +108,18 @@ function _filterTruncationNotices(lines: string[]): string[] {
 }
 
 export function stripNewLinePrefixes(lines: string[]): string[] {
-	const { nonEmpty, hashPrefixCount, diffPlusHashPrefixCount, diffPlusCount, inlineLineNumCount } =
-		collectLinePrefixStats(lines);
+	const { nonEmpty, hashPrefixCount, diffPlusHashPrefixCount, diffPlusCount } = collectLinePrefixStats(lines);
 	if (nonEmpty === 0) return lines;
 
 	const stripHash = hashPrefixCount > 0 && hashPrefixCount === nonEmpty;
-	const stripInlineOnly =
-		!stripHash && hashPrefixCount === 0 && inlineLineNumCount > 0 && inlineLineNumCount === nonEmpty;
 	const stripPlus =
-		!stripHash &&
-		!stripInlineOnly &&
-		diffPlusHashPrefixCount === 0 &&
-		diffPlusCount > 0 &&
-		diffPlusCount >= nonEmpty * 0.5;
-	if (!stripHash && !stripInlineOnly && !stripPlus && diffPlusHashPrefixCount === 0) return lines;
+		!stripHash && diffPlusHashPrefixCount === 0 && diffPlusCount > 0 && diffPlusCount >= nonEmpty * 0.5;
+	if (!stripHash && !stripPlus && diffPlusHashPrefixCount === 0) return lines;
 
 	const mapped = lines
 		.filter(line => !READ_TRUNCATION_NOTICE_RE.test(line))
 		.map(line => {
 			if (stripHash) return stripLeadingHashlinePrefixes(line);
-			if (stripInlineOnly) return stripInlineLineNum(line);
 			if (stripPlus) return line.replace(DIFF_PLUS_RE, "");
 			if (diffPlusHashPrefixCount > 0 && HASHLINE_PREFIX_PLUS_RE.test(line)) {
 				return line.replace(HASHLINE_PREFIX_RE, "");
@@ -143,26 +130,13 @@ export function stripNewLinePrefixes(lines: string[]): string[] {
 }
 
 export function stripHashlinePrefixes(lines: string[]): string[] {
-	const { nonEmpty, hashPrefixCount, inlineLineNumCount } = collectLinePrefixStats(lines);
+	const { nonEmpty, hashPrefixCount } = collectLinePrefixStats(lines);
 	if (nonEmpty === 0) return lines;
-	if (hashPrefixCount === nonEmpty) {
-		return lines
-			.filter(line => !READ_TRUNCATION_NOTICE_RE.test(line))
-			.map(line => stripLeadingHashlinePrefixes(line));
-	}
-	if (inlineLineNumCount === nonEmpty) {
-		return lines
-			.filter(line => !READ_TRUNCATION_NOTICE_RE.test(line))
-			.map(line => (line.length === 0 ? line : stripInlineLineNum(line)));
-	}
-	return lines;
+	if (hashPrefixCount !== nonEmpty) return lines;
+	return lines.filter(line => !READ_TRUNCATION_NOTICE_RE.test(line)).map(line => stripLeadingHashlinePrefixes(line));
 }
 
-const linesSchema = Type.Union([
-	Type.Array(Type.String(), { description: "content (preferred format)" }),
-	Type.String(),
-	Type.Null(),
-]);
+const linesSchema = Type.Union([Type.Array(Type.String()), Type.Null()]);
 
 const locSchema = Type.Union(
 	[
@@ -210,6 +184,11 @@ export interface ExecuteHashlineSingleOptions {
 	beginDeferredDiagnosticsForPath: (path: string) => WritethroughDeferredHandle;
 }
 
+/**
+ * Normalize line payloads for apply: strip read/grep line prefixes. The tool schema
+ * supplies `string[]` (one element per line). `null` / `undefined` yield `[]`.
+ * A single multiline `string` is still split on `\n` for the same normalization path.
+ */
 export function hashlineParseText(edit: string[] | string | null | undefined): string[] {
 	if (edit == null) return [];
 	if (typeof edit === "string") {
@@ -243,6 +222,15 @@ function resolveHashlineEditsForDiff(edits: HashlineEditInput[]): HashlineEdit[]
 	});
 }
 
+export function formatFullAnchorRequirement(raw?: string): string {
+	const suffix = typeof raw === "string" ? raw.trim() : "";
+	const hashOnlyHint = /^[A-Za-z]{2}$/.test(suffix)
+		? ` It looks like you supplied only the 2-letter suffix (${JSON.stringify(suffix)}). Copy the full anchor exactly as shown (for example, "160${suffix}").`
+		: "";
+	const received = raw === undefined ? "" : ` Received ${JSON.stringify(raw)}.`;
+	return `the full anchor exactly as shown by read/grep (line number + 2-letter suffix, for example "160sr")${received}${hashOnlyHint}`;
+}
+
 function tryParseTag(raw: string): Anchor | undefined {
 	try {
 		return parseTag(raw);
@@ -253,14 +241,24 @@ function tryParseTag(raw: string): Anchor | undefined {
 
 function requireParsedAnchor(raw: string, op: "append" | "prepend"): Anchor {
 	const anchor = tryParseTag(raw);
-	if (!anchor) throw new Error(`${op} requires a valid anchor.`);
+	if (!anchor) throw new Error(`${op} requires ${formatFullAnchorRequirement(raw)}.`);
 	return anchor;
 }
 
 function requireParsedRange(range: { pos: string; end: string }): { pos: Anchor; end: Anchor } {
 	const pos = tryParseTag(range.pos);
 	const end = tryParseTag(range.end);
-	if (!pos || !end) throw new Error("range requires valid pos and end anchors.");
+	if (!pos || !end) {
+		const invalid = [
+			!pos ? `pos=${JSON.stringify(range.pos)}` : null,
+			!end ? `end=${JSON.stringify(range.end)}` : null,
+		]
+			.filter(Boolean)
+			.join(", ");
+		throw new Error(
+			`range requires valid pos and end anchors. Use ${formatFullAnchorRequirement()}. Invalid: ${invalid}.`,
+		);
+	}
 	return { pos, end };
 }
 
@@ -315,8 +313,6 @@ interface ResolvedHashlineStreamOptions {
 	maxChunkBytes: number;
 }
 
-type HashlineLineFormatter = (lineNumber: number, line: string) => string;
-
 interface HashlineChunkEmitter {
 	pushLine: (line: string) => string[];
 	flush: () => string | undefined;
@@ -332,7 +328,7 @@ function resolveHashlineStreamOptions(options: HashlineStreamOptions): ResolvedH
 
 function createHashlineChunkEmitter(
 	options: ResolvedHashlineStreamOptions,
-	formatLine: HashlineLineFormatter,
+	formatLine = formatHashLine,
 ): HashlineChunkEmitter {
 	let lineNumber = options.startLine;
 	let outLines: string[] = [];
@@ -376,10 +372,6 @@ function createHashlineChunkEmitter(
 	return { pushLine, flush };
 }
 
-function formatHashlineStreamLine(lineNumber: number, line: string): string {
-	return `${formatLineHash(lineNumber, line)}:${line}`;
-}
-
 function isReadableStream(value: unknown): value is ReadableStream<Uint8Array> {
 	return (
 		typeof value === "object" &&
@@ -419,7 +411,7 @@ export async function* streamHashLinesFromUtf8(
 	let pending = "";
 	let sawAnyText = false;
 	let endedWithNewline = false;
-	const emitter = createHashlineChunkEmitter(resolvedOptions, formatHashlineStreamLine);
+	const emitter = createHashlineChunkEmitter(resolvedOptions);
 
 	const consumeText = (text: string): string[] => {
 		if (text.length === 0) return [];
@@ -472,7 +464,7 @@ export async function* streamHashLinesFromLines(
 	options: HashlineStreamOptions = {},
 ): AsyncGenerator<string> {
 	const resolvedOptions = resolveHashlineStreamOptions(options);
-	const emitter = createHashlineChunkEmitter(resolvedOptions, formatHashlineStreamLine);
+	const emitter = createHashlineChunkEmitter(resolvedOptions);
 	let sawAnyLine = false;
 
 	const asyncIterator = (lines as AsyncIterable<string>)[Symbol.asyncIterator];
@@ -503,20 +495,18 @@ export async function* streamHashLinesFromLines(
 }
 
 /**
- * Parse a line reference string like `"5#th"` into structured form.
+ * Parse a line reference string like `"5th"` into structured form.
  *
- * @throws Error if the format is invalid (not `NUMBER#BIGRAM`)
+ * @throws Error if the format is invalid (not `NUMBERBIGRAM`)
  */
 export function parseTag(ref: string): { line: number; hash: string } {
-	// This regex captures:
-	//  1. optional leading ">+" and whitespace
+	// Captures:
+	//  1. optional leading ">+-" markers and whitespace
 	//  2. line number (1+ digits)
-	//  3. "#" with optional surrounding spaces
-	//  4. hash (one BPE bigram from HASHLINE_BIGRAMS)
-	//  5. optional trailing display suffix (":..." or "  ...")
-	const match = ref.match(new RegExp(`^\\s*[>+-]*\\s*(\\d+)\\s*#\\s*(${HASHLINE_BIGRAM_RE_SRC})`));
+	//  3. hash (one BPE bigram from HASHLINE_BIGRAMS) directly adjacent (no separator)
+	const match = ref.match(new RegExp(`^\\s*[>+-]*\\s*(\\d+)(${HASHLINE_BIGRAM_RE_SRC})`));
 	if (!match) {
-		throw new Error(`Invalid line reference "${ref}". Expected format "LINE#ID" (e.g. "5#th").`);
+		throw new Error(`Invalid line reference. Expected ${formatFullAnchorRequirement(ref)}.`);
 	}
 	const line = Number.parseInt(match[1], 10);
 	if (line < 1) {
@@ -535,8 +525,8 @@ const MISMATCH_CONTEXT = 2;
 /**
  * Error thrown when one or more hashline references have stale hashes.
  *
- * Displays grep-style output with `>>>` markers on mismatched lines,
- * showing the correct `LINE#ID` so the caller can fix all refs at once.
+ * Displays grep-style output with `>` separator on mismatched lines and `:` on
+ * surrounding context, showing the correct `LINE+ID` so the caller can fix all refs at once.
  */
 export class HashlineMismatchError extends Error {
 	readonly remaps: ReadonlyMap<string, string>;
@@ -549,9 +539,48 @@ export class HashlineMismatchError extends Error {
 		const remaps = new Map<string, string>();
 		for (const m of mismatches) {
 			const actual = computeLineHash(m.line, fileLines[m.line - 1]);
-			remaps.set(`${m.line}#${m.expected}`, `${m.line}#${actual}`);
+			remaps.set(`${m.line}${m.expected}`, `${m.line}${actual}`);
 		}
 		this.remaps = remaps;
+	}
+
+	/**
+	 * User-visible variant of {@link formatMessage} — omits the bigram fingerprint
+	 * and uses a `│` gutter so TUI rendering is clean. The model still receives
+	 * the full `LINE+ID|content` form via {@link Error.message}.
+	 */
+	get displayMessage(): string {
+		return HashlineMismatchError.formatDisplayMessage(this.mismatches, this.fileLines);
+	}
+
+	static formatDisplayMessage(mismatches: HashMismatch[], fileLines: string[]): string {
+		const mismatchSet = new Set<number>();
+		for (const m of mismatches) mismatchSet.add(m.line);
+
+		const displayLines = new Set<number>();
+		for (const m of mismatches) {
+			const lo = Math.max(1, m.line - MISMATCH_CONTEXT);
+			const hi = Math.min(fileLines.length, m.line + MISMATCH_CONTEXT);
+			for (let i = lo; i <= hi; i++) displayLines.add(i);
+		}
+
+		const sorted = [...displayLines].sort((a, b) => a - b);
+		const out: string[] = [
+			`Edit rejected: ${mismatches.length} line${mismatches.length > 1 ? "s have" : " has"} changed since the last read. The edit was NOT applied.`,
+			"Realign your edit to the file state shown below. Copy the full anchors exactly as shown (for example `160sr`, not just `sr`).",
+			"",
+		];
+
+		const lineNumberWidth = sorted.reduce((width, lineNum) => Math.max(width, String(lineNum).length), 0);
+		let prevLine = -1;
+		for (const lineNum of sorted) {
+			if (prevLine !== -1 && lineNum > prevLine + 1) out.push("...");
+			prevLine = lineNum;
+			const text = fileLines[lineNum - 1];
+			const marker = mismatchSet.has(lineNum) ? "*" : " ";
+			out.push(formatCodeFrameLine(marker, lineNum, text ?? "", lineNumberWidth));
+		}
+		return out.join("\n");
 	}
 
 	static formatMessage(mismatches: HashMismatch[], fileLines: string[]): string {
@@ -574,7 +603,8 @@ export class HashlineMismatchError extends Error {
 		const lines: string[] = [];
 
 		lines.push(
-			`Edit rejected: ${mismatches.length} line${mismatches.length > 1 ? "s have" : " has"} changed since the last read. The edit was NOT applied. Use the updated LINE#ID references shown below (>>> marks changed lines) and retry the edit.`,
+			`Edit rejected: ${mismatches.length} line${mismatches.length > 1 ? "s have" : " has"} changed since the last read. The edit was NOT applied.`,
+			"Use the updated anchors shown below (`>` marks changed lines, `:` marks context) and retry the edit.",
 		);
 		lines.push("");
 
@@ -582,18 +612,18 @@ export class HashlineMismatchError extends Error {
 		for (const lineNum of sorted) {
 			// Gap separator between non-contiguous regions
 			if (prevLine !== -1 && lineNum > prevLine + 1) {
-				lines.push("    ...");
+				lines.push("...");
 			}
 			prevLine = lineNum;
 
 			const text = fileLines[lineNum - 1];
 			const hash = computeLineHash(lineNum, text);
-			const prefix = `${lineNum}#${hash}`;
+			const prefix = `${lineNum}${hash}`;
 
 			if (mismatchSet.has(lineNum)) {
-				lines.push(`>>> ${prefix}:${text}`);
+				lines.push(`${prefix}>${text}`);
 			} else {
-				lines.push(`    ${prefix}:${text}`);
+				lines.push(`${prefix}:${text}`);
 			}
 		}
 		return lines.join("\n");
@@ -616,6 +646,39 @@ export function validateLineRef(ref: { line: number; hash: string }, fileLines: 
 	if (actualHash !== ref.hash) {
 		throw new HashlineMismatchError([{ line: ref.line, expected: ref.hash, actual: actualHash }], fileLines);
 	}
+}
+
+/**
+ * Default search window for {@link tryRebaseAnchor} (lines on each side of the requested anchor).
+ */
+export const ANCHOR_REBASE_WINDOW = 2;
+
+/**
+ * Look for the requested hash within ±`window` lines of `anchor.line`.
+ *
+ * Returns the new line number when exactly one nearby line matches the hash;
+ * otherwise `null` (genuine mismatch or ambiguous). The caller is expected to
+ * mutate `anchor.line` in place and surface a warning so the model knows the
+ * edit was retargeted.
+ *
+ * The exact-position match (anchor.line itself) is intentionally skipped: the
+ * caller has already determined the requested line's hash does not match.
+ */
+export function tryRebaseAnchor(
+	anchor: { line: number; hash: string },
+	fileLines: string[],
+	window: number = ANCHOR_REBASE_WINDOW,
+): number | null {
+	const lo = Math.max(1, anchor.line - window);
+	const hi = Math.min(fileLines.length, anchor.line + window);
+	let found: number | null = null;
+	for (let line = lo; line <= hi; line++) {
+		if (line === anchor.line) continue;
+		if (computeLineHash(line, fileLines[line - 1]) !== anchor.hash) continue;
+		if (found !== null) return null; // ambiguous: more than one match in window
+		found = line;
+	}
+	return found;
 }
 
 function isEscapedTabAutocorrectEnabled(): boolean {
@@ -694,7 +757,7 @@ function collectBoundaryDuplicationWarning(edit: HashlineEdit, originalFileLines
 	const trimmedNext = nextSurvivingLine.trim();
 	const trimmedLast = lastInsertedLine.trim();
 	if (trimmedLast.length > 0 && trimmedLast === trimmedNext) {
-		const tag = formatLineHash(endLine + 1, nextSurvivingLine);
+		const tag = formatHashLine(endLine + 1, nextSurvivingLine);
 		warnings.push(
 			`Possible boundary duplication: your last replacement line \`${trimmedLast}\` is identical to the next surviving line ${tag}. ` +
 				`If you meant to replace the entire block, set \`end\` to ${tag} instead.`,
@@ -773,7 +836,7 @@ function applyHashlineEditToLines(
 			if (origLines.length === newLines.length && origLines.every((line, i) => line === newLines[i])) {
 				noopEdits.push({
 					editIndex,
-					loc: `${edit.pos.line}#${edit.pos.hash}`,
+					loc: `${edit.pos.line}${edit.pos.hash}`,
 					current: origLines.join("\n"),
 				});
 				break;
@@ -784,6 +847,15 @@ function applyHashlineEditToLines(
 		}
 		case "replace_range": {
 			const count = edit.end.line - edit.pos.line + 1;
+			const origRange = originalFileLines.slice(edit.pos.line - 1, edit.pos.line - 1 + count);
+			if (count === edit.lines.length && origRange.every((line, i) => line === edit.lines[i])) {
+				noopEdits.push({
+					editIndex,
+					loc: `${edit.pos.line}${edit.pos.hash}-${edit.end.line}${edit.end.hash}`,
+					current: origRange.join("\n"),
+				});
+				break;
+			}
 			fileLines.splice(edit.pos.line - 1, count, ...edit.lines);
 			trackFirstChanged(edit.pos.line);
 			break;
@@ -793,7 +865,7 @@ function applyHashlineEditToLines(
 			if (inserted.length === 0) {
 				noopEdits.push({
 					editIndex,
-					loc: `${edit.pos.line}#${edit.pos.hash}`,
+					loc: `${edit.pos.line}${edit.pos.hash}`,
 					current: originalFileLines[edit.pos.line - 1],
 				});
 				break;
@@ -807,7 +879,7 @@ function applyHashlineEditToLines(
 			if (inserted.length === 0) {
 				noopEdits.push({
 					editIndex,
-					loc: `${edit.pos.line}#${edit.pos.hash}`,
+					loc: `${edit.pos.line}${edit.pos.hash}`,
 					current: originalFileLines[edit.pos.line - 1],
 				});
 				break;
@@ -868,7 +940,7 @@ function buildHashlineEditResult(params: {
 	};
 }
 
-function validateHashlineEditRefs(edits: HashlineEdit[], fileLines: string[]): HashMismatch[] {
+function validateHashlineEditRefs(edits: HashlineEdit[], fileLines: string[], warnings: string[]): HashMismatch[] {
 	const mismatches: HashMismatch[] = [];
 	for (const edit of edits) {
 		switch (edit.op) {
@@ -901,6 +973,15 @@ function validateHashlineEditRefs(edits: HashlineEdit[], fileLines: string[]): H
 		}
 		const actualHash = computeLineHash(ref.line, fileLines[ref.line - 1]);
 		if (actualHash === ref.hash) {
+			return;
+		}
+		const rebased = tryRebaseAnchor(ref, fileLines);
+		if (rebased !== null) {
+			const original = `${ref.line}${ref.hash}`;
+			ref.line = rebased;
+			warnings.push(
+				`Auto-rebased anchor ${original} → ${rebased}${ref.hash} (line shifted within ±${ANCHOR_REBASE_WINDOW}; hash matched).`,
+			);
 			return;
 		}
 		mismatches.push({ line: ref.line, expected: ref.hash, actual: actualHash });
@@ -941,7 +1022,7 @@ export function applyHashlineEdits(
 	const noopEdits: Array<{ editIndex: number; loc: string; current: string }> = [];
 	const warnings: string[] = [];
 
-	const mismatches = validateHashlineEditRefs(edits, fileLines);
+	const mismatches = validateHashlineEditRefs(edits, fileLines, warnings);
 	if (mismatches.length > 0) {
 		throw new HashlineMismatchError(mismatches, fileLines);
 	}
@@ -1041,14 +1122,12 @@ function syncNewLineCounters(counters: CompactPreviewCounters, lineNumber: numbe
 	counters.newLine = lineNumber;
 }
 
-function formatCompactHashlineLine(kind: " " | "+", lineNumber: number, width: number, content: string): string {
-	const padded = String(lineNumber).padStart(width, " ");
-	return `${kind}${padded}#${computeLineHash(lineNumber, content)}|${content}`;
+function formatCompactHashlineLine(kind: " " | "+", lineNumber: number, content: string): string {
+	return `${kind}${lineNumber}${computeLineHash(lineNumber, content)}${HASHLINE_CONTENT_SEPARATOR}${content}`;
 }
 
-function formatCompactRemovedLine(lineNumber: number, width: number, content: string): string {
-	const padded = String(lineNumber).padStart(width, " ");
-	return `-${padded}${HASHLINE_PREVIEW_PLACEHOLDER}|${content}`;
+function formatCompactRemovedLine(lineNumber: number, content: string): string {
+	return `-${lineNumber}${HASHLINE_PREVIEW_PLACEHOLDER}${HASHLINE_CONTENT_SEPARATOR}${content}`;
 }
 
 function formatCompactPreviewLine(line: string, counters: CompactPreviewCounters): { kind: DiffRunKind; text: string } {
@@ -1069,13 +1148,13 @@ function formatCompactPreviewLine(line: string, counters: CompactPreviewCounters
 			syncNewLineCounters(counters, parsed.lineNumber);
 			const newLine = counters.newLine;
 			if (newLine === undefined) return { kind: "+", text: parsed.raw };
-			const text = formatCompactHashlineLine("+", newLine, parsed.lineWidth, parsed.content);
+			const text = formatCompactHashlineLine("+", newLine, parsed.content);
 			counters.newLine = newLine + 1;
 			return { kind: "+", text };
 		}
 		case "-": {
 			syncOldLineCounters(counters, parsed.lineNumber);
-			const text = formatCompactRemovedLine(parsed.lineNumber, parsed.lineWidth, parsed.content);
+			const text = formatCompactRemovedLine(parsed.lineNumber, parsed.content);
 			counters.oldLine = parsed.lineNumber + 1;
 			return { kind: "-", text };
 		}
@@ -1083,7 +1162,7 @@ function formatCompactPreviewLine(line: string, counters: CompactPreviewCounters
 			syncOldLineCounters(counters, parsed.lineNumber);
 			const newLine = counters.newLine;
 			if (newLine === undefined) return { kind: " ", text: parsed.raw };
-			const text = formatCompactHashlineLine(" ", newLine, parsed.lineWidth, parsed.content);
+			const text = formatCompactHashlineLine(" ", newLine, parsed.content);
 			counters.oldLine = parsed.lineNumber + 1;
 			counters.newLine = newLine + 1;
 			return { kind: " ", text };
@@ -1309,6 +1388,11 @@ export async function executeHashlineSingle(
 				if (preview.length > 0) {
 					diagnostic += `\nThe file currently contains these lines:\n${preview}\nYour edits were normalized back to the original content (whitespace-only differences are preserved as-is). Ensure your replacement changes actual code, not just formatting.`;
 				}
+			}
+			if (result.noopEdits.some(e => e.loc.includes("-"))) {
+				diagnostic +=
+					"\nHint: a `range` loc replaces the entire span inclusive of both endpoints. " +
+					"If your replacement repeats the existing content, narrow the range or change the replacement.";
 			}
 		}
 		throw new Error(diagnostic);
