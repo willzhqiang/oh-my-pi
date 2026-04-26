@@ -370,8 +370,8 @@ function prependSuffixResolutionNotice(text: string, suffixResolution?: { from: 
 
 const readSchema = Type.Object({
 	path: Type.String({ description: "Path or URL to read" }),
-	sel: Type.Optional(Type.String({ description: "Selector: chunk path, L10-L50, or raw" })),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 20)" })),
+	sel: Type.Optional(Type.String({ description: "Selector" })),
+	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds", default: 20 })),
 });
 
 export type ReadToolInput = Static<typeof readSchema>;
@@ -599,9 +599,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			sourceInternal?: string;
 			entityLabel: string;
 			ignoreResultLimits?: boolean;
+			raw?: boolean;
 		},
 	): AgentToolResult<ReadToolDetails> {
-		const displayMode = resolveFileDisplayMode(this.session);
+		const displayMode = resolveFileDisplayMode(this.session, { raw: options.raw });
 		const details = options.details ?? {};
 		const allLines = text.split("\n");
 		const totalLines = allLines.length;
@@ -743,6 +744,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		limit: number | undefined,
 		resolvedArchivePath: ResolvedArchiveReadPath,
 		signal?: AbortSignal,
+		options?: { raw?: boolean },
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		throwIfAborted(signal);
 		const archive = await openArchive(resolvedArchivePath.absolutePath);
@@ -787,6 +789,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			details,
 			sourcePath: resolvedArchivePath.absolutePath,
 			entityLabel: "archive entry",
+			raw: options?.raw,
 		});
 		const firstText = result.content.find((content): content is TextContent => content.type === "text");
 		if (firstText) {
@@ -978,7 +981,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const archivePath = await this.#resolveArchiveReadPath(localReadPath, signal);
 		if (archivePath) {
 			const { offset, limit } = selToOffsetLimit(parsed);
-			return this.#readArchive(readPath, offset, limit, archivePath, signal);
+			return this.#readArchive(readPath, offset, limit, archivePath, signal, { raw: parsed.kind === "raw" });
 		}
 
 		const sqlitePath = await this.#resolveSqliteReadPath(readPath, signal);
@@ -1247,8 +1250,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				firstLineExceedsLimit,
 			};
 
-			const shouldAddHashLines = displayMode.hashLines;
-			const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
+			const isRawMode = parsed.kind === "raw";
+			const shouldAddHashLines = !isRawMode && displayMode.hashLines;
+			const shouldAddLineNumbers = isRawMode ? false : shouldAddHashLines ? false : displayMode.lineNumbers;
 			const formatText = (text: string, startNum: number): string => {
 				return formatTextWithMode(text, startNum, shouldAddHashLines, shouldAddLineNumbers);
 			};

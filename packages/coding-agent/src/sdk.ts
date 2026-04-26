@@ -194,6 +194,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Enable MCP server discovery from .mcp.json files. Default: true */
 	enableMCP?: boolean;
+	/** Existing MCP manager to reuse (skips discovery, propagates to toolSession). */
+	mcpManager?: MCPManager;
 
 	/** Enable LSP integration (tool, formatting, diagnostics, warmup). Default: true */
 	enableLsp?: boolean;
@@ -207,8 +209,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Output schema for structured completion (subagents) */
 	outputSchema?: unknown;
-	/** Whether to include the submit_result tool by default */
-	requireSubmitResultTool?: boolean;
+	/** Whether to include the yield tool by default */
+	requireYieldTool?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
 	taskDepth?: number;
 	/** Parent task ID prefix for nested artifact naming (e.g., "6-Extensions") */
@@ -914,7 +916,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			skills,
 			eventBus,
 			outputSchema: options.outputSchema,
-			requireSubmitResultTool: options.requireSubmitResultTool,
+			requireYieldTool: options.requireYieldTool,
 			taskDepth: options.taskDepth ?? 0,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			getPythonKernelOwnerId: () => pythonKernelOwnerId,
@@ -1005,10 +1007,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const builtinTools = await logger.time("createAllTools", createTools, toolSession, options.toolNames);
 
 		// Discover MCP tools from .mcp.json files
-		let mcpManager: MCPManager | undefined;
+		let mcpManager: MCPManager | undefined = options.mcpManager;
 		const enableMCP = options.enableMCP ?? true;
 		const customTools: CustomTool[] = [];
-		if (enableMCP) {
+		if (enableMCP && !mcpManager) {
 			const mcpResult = await logger.time("discoverAndLoadMCPTools", discoverAndLoadMCPTools, cwd, {
 				onConnecting: serverNames => {
 					if (options.hasUI && serverNames.length > 0) {
@@ -1024,7 +1026,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				authStorage,
 			});
 			mcpManager = mcpResult.manager;
-			toolSession.mcpManager = mcpManager;
 
 			if (settings.get("mcp.notifications")) {
 				mcpManager.setNotificationsEnabled(true);
@@ -1044,6 +1045,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				customTools.push(...mcpResult.tools.map(loaded => loaded.tool));
 			}
 		}
+		toolSession.mcpManager = mcpManager;
 
 		// Add Gemini image tools if GEMINI_API_KEY (or GOOGLE_API_KEY) is available
 		const geminiImageTools = await logger.time("getGeminiImageTools", getGeminiImageTools);
@@ -1677,8 +1679,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}),
 		);
 
-		// Wire MCP manager callbacks to session for reactive tool updates
-		if (mcpManager) {
+		// Wire MCP manager callbacks to session for reactive tool updates.
+		// Skip when reusing a parent's manager — the parent owns the callbacks.
+		if (mcpManager && !options.mcpManager) {
 			mcpManager.setOnToolsChanged(tools => {
 				void session.refreshMCPTools(tools);
 			});

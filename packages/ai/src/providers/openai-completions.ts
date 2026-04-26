@@ -35,19 +35,18 @@ import {
 	type CapturedHttpErrorResponse,
 	finalizeErrorMessage,
 	type RawHttpRequestDump,
-	rewriteCopilotAuthError,
+	rewriteCopilotError,
 } from "../utils/http-inspector";
 import {
-	createFirstEventWatchdog,
+	createWatchdog,
 	getOpenAIStreamIdleTimeoutMs,
 	getStreamFirstEventTimeoutMs,
 	iterateWithIdleTimeout,
-	markFirstStreamEvent,
 } from "../utils/idle-iterator";
 import { parseStreamingJson } from "../utils/json-parse";
 import { parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
 import { getKimiCommonHeaders } from "../utils/oauth/kimi";
-import { extractHttpStatusFromError } from "../utils/retry";
+import { callWithCopilotModelRetry, extractHttpStatusFromError } from "../utils/retry";
 import { adaptSchemaForStrict, NO_STRICT } from "../utils/schema";
 import { mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
 import {
@@ -246,7 +245,10 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 			};
 			let openaiStream: AsyncIterable<ChatCompletionChunk>;
 			try {
-				openaiStream = await createCompletionsStream();
+				openaiStream = await callWithCopilotModelRetry(() => createCompletionsStream(), {
+					provider: model.provider,
+					signal: requestSignal,
+				});
 			} catch (error) {
 				const capturedErrorResponse = getCapturedErrorResponse();
 				if (!shouldRetryWithoutStrictTools(error, capturedErrorResponse, appliedToolStrictMode, context.tools)) {
@@ -254,7 +256,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				}
 				openaiStream = await createCompletionsStream("none");
 			}
-			const firstEventWatchdog = createFirstEventWatchdog(
+			const firstEventWatchdog = createWatchdog(
 				options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs),
 				() => abortTracker.abortLocally(firstEventTimeoutAbortError),
 			);
@@ -382,7 +384,8 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				}
 			};
 
-			for await (const chunk of iterateWithIdleTimeout(markFirstStreamEvent(openaiStream, firstEventWatchdog), {
+			for await (const chunk of iterateWithIdleTimeout(openaiStream, {
+				watchdog: firstEventWatchdog,
 				idleTimeoutMs,
 				errorMessage: "OpenAI completions stream stalled while waiting for the next event",
 				onIdle: () => requestAbortController.abort(),
@@ -552,7 +555,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
-			output.errorMessage = rewriteCopilotAuthError(output.errorMessage, error, model.provider);
+			output.errorMessage = rewriteCopilotError(output.errorMessage, error, model.provider);
 			output.duration = Date.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
@@ -614,6 +617,16 @@ async function createClient(
 		copilotPremiumRequests = copilot.premiumRequests;
 		baseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, rawApiKey) ?? model.baseUrl;
 	}
+	// Azure OpenAI requires /deployments/{id}/chat/completions?api-version=YYYY-MM-DD.
+	// The generic openai-completions path adds neither, producing silent 404s.
+	let azureDefaultQuery: Record<string, string> | undefined;
+	if (baseUrl?.includes(".openai.azure.com")) {
+		const apiVersion = $env.AZURE_OPENAI_API_VERSION || "2024-10-21";
+		if (!baseUrl.includes("/deployments/")) {
+			baseUrl = `${baseUrl}/deployments/${model.id}`;
+		}
+		azureDefaultQuery = { "api-version": apiVersion };
+	}
 	let capturedErrorResponse: CapturedHttpErrorResponse | undefined;
 	const wrappedFetch = Object.assign(
 		async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -649,6 +662,7 @@ async function createClient(
 			dangerouslyAllowBrowser: true,
 			maxRetries: 5,
 			defaultHeaders: headers,
+			defaultQuery: azureDefaultQuery,
 			fetch: wrappedFetch,
 		}),
 		copilotPremiumRequests,
@@ -671,6 +685,7 @@ function buildParams(
 	const compat = getCompat(model, resolvedBaseUrl);
 	const messages = convertMessages(model, context, compat);
 	maybeAddOpenRouterAnthropicCacheControl(model, messages);
+	const supportsReasoningParams = model.provider !== "github-copilot";
 
 	// Kimi (including via OpenRouter) calculates TPM rate limits based on max_tokens, not actual output.
 	// Always send max_tokens to avoid their high default causing rate limit issues.
@@ -736,22 +751,27 @@ function buildParams(
 		params.tool_choice = mapToOpenAICompletionsToolChoice(options.toolChoice);
 	}
 
-	if (compat.thinkingFormat === "zai" && model.reasoning) {
+	if (supportsReasoningParams && compat.thinkingFormat === "zai" && model.reasoning) {
 		// Z.ai uses binary thinking: { type: "enabled" | "disabled" }
 		// Must explicitly disable since z.ai defaults to thinking enabled
 		Reflect.set(params, "thinking", { type: options?.reasoning ? "enabled" : "disabled" });
-	} else if (compat.thinkingFormat === "qwen" && model.reasoning) {
+	} else if (supportsReasoningParams && compat.thinkingFormat === "qwen" && model.reasoning) {
 		// Qwen uses top-level enable_thinking: boolean
 		Reflect.set(params, "enable_thinking", !!options?.reasoning);
-	} else if (compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {
+	} else if (supportsReasoningParams && compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {
 		Reflect.set(params, "chat_template_kwargs", { enable_thinking: !!options?.reasoning });
-	} else if (compat.thinkingFormat === "openrouter" && options?.reasoning && model.reasoning) {
+	} else if (
+		supportsReasoningParams &&
+		compat.thinkingFormat === "openrouter" &&
+		options?.reasoning &&
+		model.reasoning
+	) {
 		// OpenRouter normalizes reasoning across providers via a nested reasoning object.
 		const openRouterParams = params as typeof params & { reasoning?: { effort?: string } };
 		openRouterParams.reasoning = {
 			effort: mapReasoningEffort(options.reasoning, compat.reasoningEffortMap),
 		};
-	} else if (options?.reasoning && model.reasoning && compat.supportsReasoningEffort) {
+	} else if (supportsReasoningParams && options?.reasoning && model.reasoning && compat.supportsReasoningEffort) {
 		// OpenAI-style reasoning_effort
 		Reflect.set(params, "reasoning_effort", mapReasoningEffort(options.reasoning, compat.reasoningEffortMap));
 	}

@@ -16,7 +16,7 @@ import { createModelManager } from "../src/model-manager";
 import {
 	applyGeneratedModelPolicies,
 	CLOUDFLARE_FALLBACK_MODEL,
-	linkSparkPromotionTargets,
+	linkOpenAIPromotionTargets,
 } from "../src/model-thinking";
 import prevModelsJson from "../src/models.json" with { type: "json" };
 import {
@@ -481,7 +481,7 @@ async function generateModels() {
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
 	allModels = applyPremiumMultiplierOverrides(allModels);
 	applyGeneratedModelPolicies(allModels);
-	linkSparkPromotionTargets(allModels);
+	linkOpenAIPromotionTargets(allModels);
 
 	// Group by provider and sort each provider's models
 	const providers: Record<string, Record<string, Model>> = {};

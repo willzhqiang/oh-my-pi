@@ -11,7 +11,7 @@ import type { AgentMessage, ResolvedThinkingLevel, ThinkingLevel } from "@oh-my-
 import type { Model } from "@oh-my-pi/pi-ai";
 
 import { computeLineHash, formatSessionDumpText, RpcClient } from "@oh-my-pi/pi-coding-agent";
-import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { prompt } from "@oh-my-pi/pi-utils";
 import { diffLines } from "diff";
 import { formatDirectory } from "./formatter";
 import { discoverSharedInfra, InProcessClient, type SharedInfra } from "./in-process-client";
@@ -21,7 +21,7 @@ import benchmarkTaskPrompt from "./prompts/benchmark-task.md" with { type: "text
 import type { EditTask } from "./tasks";
 import { verifyExpectedFileSubset, verifyExpectedFiles } from "./verify";
 
-const TMP = `/tmp/rb-${crypto.randomUUID()}`;
+const TMP = `/tmp/rb-${Math.random().toString(36).slice(2, 10)}`;
 const CLI_PATH = Bun.fileURLToPath(import.meta.resolve("@oh-my-pi/pi-coding-agent/cli"));
 
 /** Subset of session state used for markdown conversation dumps (parity with /dump). */
@@ -40,7 +40,7 @@ interface BenchmarkClient {
 	onEvent(listener: (event: { type: string; [key: string]: unknown }) => void): () => void;
 	prompt(text: string): Promise<void>;
 	followUp(text: string): Promise<void>;
-	getSessionStats(): Promise<{ tokens: { input: number; output: number; total: number } }>;
+	getSessionStats(): Promise<{ tokens: { input: number; output: number; total: number }; assistantMessages: number }>;
 	getLastAssistantText(): Promise<string | null>;
 	getMessages(): Promise<AgentMessage[]>;
 	getState(): Promise<ConversationDumpSessionState>;
@@ -50,8 +50,9 @@ interface BenchmarkClient {
 
 fs.mkdirSync(TMP);
 
-function makeTempDir(pre?: string): string {
-	const dir = path.join(TMP, `${pre ?? ""}${Snowflake.next()}`);
+let n = 0;
+function subtmp(pre: string): string {
+	const dir = path.join(TMP, `${pre}-${n++}`);
 	fs.mkdirSync(dir);
 	return dir;
 }
@@ -70,7 +71,7 @@ export interface BenchmarkConfig {
 	requireReadToolCall?: boolean;
 	noEditRequired?: boolean;
 	autoFormat?: boolean;
-	editVariant?: "replace" | "patch" | "hashline" | "chunk" | "vim" | "auto";
+	editVariant?: string;
 	editFuzzy?: boolean | "auto";
 	editFuzzyThreshold?: number | "auto";
 	guided?: boolean;
@@ -191,11 +192,11 @@ const HASHLINE_SUBTYPES = ["set", "set_range", "insert"] as const;
 
 const CHUNK_OP_SUBTYPES = ["append", "prepend", "replace", "delete"] as const;
 
-const BENCHMARK_TOOL_NAMES = ["read", "edit", "vim", "write"] as const;
-const EDIT_TOOL_NAMES = ["edit", "vim"] as const;
+const BENCHMARK_TOOL_NAMES = ["read", "edit", "vim", "write", "apply_patch"] as const;
+const EDIT_TOOL_NAMES = ["edit", "vim", "apply_patch"] as const;
 
 function isEditTool(toolName: unknown): toolName is (typeof EDIT_TOOL_NAMES)[number] {
-	return toolName === "edit" || toolName === "vim";
+	return toolName === "edit" || toolName === "vim" || toolName === "apply_patch";
 }
 
 function isMutationTool(toolName: unknown): boolean {
@@ -961,6 +962,9 @@ async function runSingleTask(
 				await client.setThinkingLevel(config.thinkingLevel);
 			}
 
+			const initialState = await client.getState();
+			const systemPromptTokens = estimateTokens(initialState.systemPrompt ?? "");
+
 			const maxAttempts = Math.max(1, Math.floor(config.maxAttempts ?? 1));
 			const maxTimeoutRetries = config.maxTimeoutRetries ?? 3;
 			const noOpRetryLimit = config.noOpRetryLimit ?? 2;
@@ -1014,7 +1018,7 @@ async function runSingleTask(
 					throw err;
 				}
 				const statsAfter = await client.getSessionStats();
-				const attemptTokens = diffTokenStats(statsBefore, statsAfter);
+				const attemptTokens = diffTokenStats(statsBefore, statsAfter, systemPromptTokens);
 				tokens = {
 					input: tokens.input + attemptTokens.input,
 					output: tokens.output + attemptTokens.output,
@@ -1345,7 +1349,7 @@ async function _runRpcBenchmarkRun(
 				throw err;
 			}
 			const statsAfter = await client.getSessionStats();
-			const attemptTokens = diffTokenStats(statsBefore, statsAfter);
+			const attemptTokens = diffTokenStats(statsBefore, statsAfter, 0);
 			tokens = {
 				input: tokens.input + attemptTokens.input,
 				output: tokens.output + attemptTokens.output,
@@ -1771,13 +1775,24 @@ async function collectPromptEvents(
 	return events;
 }
 
+/** Rough token estimate (4 chars per token). Used to subtract system prompt overhead. */
+function estimateTokens(text: string): number {
+	return Math.ceil(text.length / 4);
+}
+
 function diffTokenStats(
-	before: { tokens: { input: number; output: number; total: number } },
-	after: { tokens: { input: number; output: number; total: number } },
+	before: { tokens: { input: number; output: number; total: number }; assistantMessages: number },
+	after: { tokens: { input: number; output: number; total: number }; assistantMessages: number },
+	systemPromptTokens: number,
 ): TokenStats {
+	// The system prompt (and tool definitions) live in cacheRead/cacheWrite, not in `input`.
+	// `input` already excludes the cached system prompt; only `total` (which sums cache too)
+	// needs the overhead subtracted, once per LLM call.
+	const calls = Math.max(0, after.assistantMessages - before.assistantMessages);
+	const overhead = calls * systemPromptTokens;
 	const input = Math.max(0, after.tokens.input - before.tokens.input);
 	const output = Math.max(0, after.tokens.output - before.tokens.output);
-	const total = Math.max(0, after.tokens.total - before.tokens.total);
+	const total = Math.max(0, after.tokens.total - before.tokens.total - overhead);
 	return { input, output, total };
 }
 
@@ -1886,7 +1901,7 @@ async function runConcurrentBenchmarkRun(
 	onProgress?: (event: ProgressEvent) => void,
 	shared?: SharedInfra,
 ): Promise<{ task: EditTask; result: TaskRunResult }> {
-	const workDir = makeTempDir(item.task.id);
+	const workDir = subtmp(item.task.id);
 
 	try {
 		await copyFixtures(item.task, workDir);
@@ -1917,7 +1932,7 @@ export async function runTask(
 		: undefined;
 
 	const runPromises = Array.from({ length: config.runsPerTask }, async (_, index) => {
-		const tempDir = makeTempDir(task.id);
+		const tempDir = subtmp(task.id);
 		await copyFixtures(task, tempDir);
 		onProgress?.({ taskId: task.id, runIndex: index, status: "started" });
 		const result = await runSingleTask(task, index, config, tempDir, task.expectedDir, shared);

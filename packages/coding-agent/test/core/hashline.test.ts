@@ -4,6 +4,9 @@ import {
 	buildCompactHashlineDiffPreview,
 	computeLineHash,
 	formatHashLines,
+	HASHLINE_BIGRAM_RE_SRC,
+	HASHLINE_BIGRAMS,
+	HASHLINE_BIGRAMS_COUNT,
 	HashlineMismatchError,
 	hashlineParseText,
 	parseTag,
@@ -22,6 +25,13 @@ function makeTag(line: number, content: string): Anchor {
 	};
 }
 
+/** Returns a valid bigram that's guaranteed NOT to equal the real hash of `(line, content)`. */
+function staleBigramFor(line: number, content: string): string {
+	const real = computeLineHash(line, content);
+	const idx = HASHLINE_BIGRAMS.indexOf(real);
+	return HASHLINE_BIGRAMS[(idx + 1) % HASHLINE_BIGRAMS_COUNT];
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // computeLineHash
 // ═══════════════════════════════════════════════════════════════════════════
@@ -29,7 +39,7 @@ function makeTag(line: number, content: string): Anchor {
 describe("computeLineHash", () => {
 	it("returns 2-4 character alphanumeric hash string", () => {
 		const hash = computeLineHash(1, "hello");
-		expect(hash).toMatch(/^[ZPMQVRWSNKTXJBYH]{2}$/);
+		expect(hash).toMatch(new RegExp(`^${HASHLINE_BIGRAM_RE_SRC}$`));
 	});
 
 	it("same content at same line produces same hash", () => {
@@ -46,7 +56,7 @@ describe("computeLineHash", () => {
 
 	it("empty line produces valid hash", () => {
 		const hash = computeLineHash(1, "");
-		expect(hash).toMatch(/^[ZPMQVRWSNKTXJBYH]{2}$/);
+		expect(hash).toMatch(new RegExp(`^${HASHLINE_BIGRAM_RE_SRC}$`));
 	});
 
 	it("uses line number for symbol-only lines", () => {
@@ -93,7 +103,7 @@ describe("formatHashLines", () => {
 		const result = formatHashLines("foo\n\nbar");
 		const lines = result.split("\n");
 		expect(lines).toHaveLength(3);
-		expect(lines[1]).toMatch(/^2#[ZPMQVRWSNKTXJBYH]{2}:$/);
+		expect(lines[1]).toMatch(new RegExp(`^2#${HASHLINE_BIGRAM_RE_SRC}:$`));
 	});
 
 	it("round-trips with computeLineHash", () => {
@@ -102,7 +112,7 @@ describe("formatHashLines", () => {
 		const lines = formatted.split("\n");
 
 		for (let i = 0; i < lines.length; i++) {
-			const match = lines[i].match(/^(\d+)#([ZPMQVRWSNKTXJBYH]{2}):(.*)$/);
+			const match = lines[i].match(new RegExp(`^(\\d+)#(${HASHLINE_BIGRAM_RE_SRC}):(.*)$`));
 			expect(match).not.toBeNull();
 			const lineNum = Number.parseInt(match![1], 10);
 			const hash = match![2];
@@ -171,8 +181,8 @@ describe("streamHashLinesFrom*", () => {
 
 describe("parseTag", () => {
 	it("parses valid reference", () => {
-		const ref = parseTag("5#QQ");
-		expect(ref).toEqual({ line: 5, hash: "QQ" });
+		const ref = parseTag("5#th");
+		expect(ref).toEqual({ line: 5, hash: "th" });
 	});
 
 	it("rejects single-character hash", () => {
@@ -180,8 +190,8 @@ describe("parseTag", () => {
 	});
 
 	it("parses long hash by taking strict 2-char prefix", () => {
-		const ref = parseTag("100#QQQQ");
-		expect(ref).toEqual({ line: 100, hash: "QQ" });
+		const ref = parseTag("100#thQQ");
+		expect(ref).toEqual({ line: 100, hash: "th" });
 	});
 
 	it("rejects missing separator", () => {
@@ -197,7 +207,7 @@ describe("parseTag", () => {
 	});
 
 	it("rejects line number 0", () => {
-		expect(() => parseTag("0#QQ")).toThrow(/Line number must be >= 1/);
+		expect(() => parseTag("0#th")).toThrow(/Line number must be >= 1/);
 	});
 
 	it("rejects empty string", () => {
@@ -233,7 +243,7 @@ describe("validateLineRef", () => {
 
 	it("rejects mismatched hash", () => {
 		const lines = ["hello", "world"];
-		expect(() => validateLineRef({ line: 1, hash: "0000" }, lines)).toThrow(/has changed since last read/);
+		expect(() => validateLineRef({ line: 1, hash: "0000" }, lines)).toThrow(/Edit rejected:.*has changed/);
 	});
 
 	it("validates last line correctly", () => {
@@ -541,7 +551,7 @@ describe("applyHashlineEdits — heuristics", () => {
 		expect(result.lines).toBe("if (ok) {\n  runSafe();\n}\n}\nafter();");
 		expect(result.warnings).toHaveLength(1);
 		expect(result.warnings?.[0]).toContain("Possible boundary duplication");
-		expect(result.warnings?.[0]).toContain("set `end` to 3#RZ");
+		expect(result.warnings?.[0]).toContain("set `end` to 3#en");
 	});
 
 	it("preserves duplicated trailing content when replacement re-emits the next line", () => {
@@ -558,7 +568,7 @@ describe("applyHashlineEdits — heuristics", () => {
 		expect(result.lines).toBe("start\n  newCall();\nnextCall();\nnextCall();\nafter();");
 		expect(result.warnings).toHaveLength(1);
 		expect(result.warnings?.[0]).toContain("Possible boundary duplication");
-		expect(result.warnings?.[0]).toContain("set `end` to 3#HR");
+		expect(result.warnings?.[0]).toContain("set `end` to 3#te");
 	});
 
 	it("preserves duplicated leading content when replacement re-emits the previous line", () => {
@@ -724,13 +734,17 @@ describe("applyHashlineEdits — errors", () => {
 	it("rejects stale hash", () => {
 		const content = "aaa\nbbb\nccc";
 		// Use a hash that doesn't match any line (avoid 00 — ccc hashes to 00)
-		const edits: HashlineEdit[] = [{ op: "replace_line", pos: parseTag("2#QQ"), lines: ["BBB"] }];
+		const edits: HashlineEdit[] = [
+			{ op: "replace_line", pos: parseTag(`2#${staleBigramFor(2, "bbb")}`), lines: ["BBB"] },
+		];
 		expect(() => applyHashlineEdits(content, edits)).toThrow(HashlineMismatchError);
 	});
 
 	it("stale hash error shows >>> markers with correct hashes", () => {
 		const content = "aaa\nbbb\nccc\nddd\neee";
-		const edits: HashlineEdit[] = [{ op: "replace_line", pos: parseTag("2#QQ"), lines: ["BBB"] }];
+		const edits: HashlineEdit[] = [
+			{ op: "replace_line", pos: parseTag(`2#${staleBigramFor(2, "bbb")}`), lines: ["BBB"] },
+		];
 
 		try {
 			applyHashlineEdits(content, edits);
@@ -754,8 +768,8 @@ describe("applyHashlineEdits — errors", () => {
 		const content = "aaa\nbbb\nccc\nddd\neee";
 		// Use hashes that don't match any line (avoid 00 — ccc hashes to 00)
 		const edits: HashlineEdit[] = [
-			{ op: "replace_line", pos: parseTag("2#ZZ"), lines: ["BBB"] },
-			{ op: "replace_line", pos: parseTag("4#ZZ"), lines: ["DDD"] },
+			{ op: "replace_line", pos: parseTag(`2#${staleBigramFor(2, "bbb")}`), lines: ["BBB"] },
+			{ op: "replace_line", pos: parseTag(`4#${staleBigramFor(4, "ddd")}`), lines: ["DDD"] },
 		];
 
 		try {
@@ -797,7 +811,7 @@ describe("applyHashlineEdits — errors", () => {
 
 	it("rejects out-of-range line", () => {
 		const content = "aaa\nbbb";
-		const edits: HashlineEdit[] = [{ op: "replace_line", pos: parseTag("10#ZZ"), lines: ["X"] }];
+		const edits: HashlineEdit[] = [{ op: "replace_line", pos: parseTag(`10#${HASHLINE_BIGRAMS[0]}`), lines: ["X"] }];
 
 		expect(() => applyHashlineEdits(content, edits)).toThrow(/does not exist/);
 	});
@@ -904,27 +918,27 @@ describe("stripNewLinePrefixes", () => {
 	});
 
 	it("strips hashline prefixes when all non-empty lines carry them", () => {
-		const lines = ["1#WQ:foo", "2#TZ:bar", "3#HX:baz"];
+		const lines = ["1#th:foo", "2#er:bar", "3#in:baz"];
 		expect(stripNewLinePrefixes(lines)).toEqual(["foo", "bar", "baz"]);
 	});
 
 	it("strips plus hashline prefixes when all non-empty lines carry them", () => {
-		const lines = ["+WQ:foo", "+TZ:bar", "+HX:baz"];
+		const lines = ["+th:foo", "+er:bar", "+in:baz"];
 		expect(stripNewLinePrefixes(lines)).toEqual(["foo", "bar", "baz"]);
 	});
 
 	it("strips plus hashline prefixes in mixed +/ - change style", () => {
-		const lines = ["-**Storage location TBD:**", "+MW:**Storage location TBD:**"];
+		const lines = ["-**Storage location TBD:**", "+ti:**Storage location TBD:**"];
 		expect(stripNewLinePrefixes(lines)).toEqual(["-**Storage location TBD:**", "**Storage location TBD:**"]);
 	});
 
 	it("does NOT strip hashline prefixes when any non-empty line is plain content", () => {
-		const lines = ["1#WQ:foo", "bar", "3#HX:baz"];
-		expect(stripNewLinePrefixes(lines)).toEqual(["1#WQ:foo", "bar", "3#HX:baz"]);
+		const lines = ["1#th:foo", "bar", "3#in:baz"];
+		expect(stripNewLinePrefixes(lines)).toEqual(["1#th:foo", "bar", "3#in:baz"]);
 	});
 
 	it("strips hash-only prefixes when all non-empty lines carry them", () => {
-		const lines = ["#WQ:", "#TZ:{{/*", "#HX:OC deployment container livenessProbe template"];
+		const lines = ["#th:", "#er:{{/*", "#in:OC deployment container livenessProbe template"];
 		expect(stripNewLinePrefixes(lines)).toEqual(["", "{{/*", "OC deployment container livenessProbe template"]);
 	});
 
@@ -946,9 +960,9 @@ describe("stripNewLinePrefixes", () => {
 
 	it("strips hashline prefixes when truncation marker is present (anchor corruption bug)", () => {
 		const lines = [
-			"1#BQ:---",
-			"2#XS:title: example",
-			"3#BQ:---",
+			"1#an:---",
+			"2#re:title: example",
+			"3#an:---",
 			"",
 			"[Showing lines 1-300 of 332. Use sel=L301 to continue]",
 		];
@@ -959,14 +973,14 @@ describe("stripNewLinePrefixes", () => {
 	});
 
 	it("strips hashline prefixes when generic read truncation notice is present", () => {
-		const lines = ["1#BQ:line one", "2#XS:line two", "", "[42 more lines in file. Use sel=L3 to continue]"];
+		const lines = ["1#an:line one", "2#re:line two", "", "[42 more lines in file. Use sel=L3 to continue]"];
 		const result = stripNewLinePrefixes(lines);
 		expect(result[0]).toBe("line one");
 		expect(result[1]).toBe("line two");
 	});
 
 	it("strips nested hashline prefixes (already-corrupted content re-read)", () => {
-		const lines = ["1#NX:1#BQ:---", "2#TY:2#XS:title: example", "3#JZ:3#BQ:---"];
+		const lines = ["1#nd:1#an:---", "2#ti:2#re:title: example", "3#es:3#an:---"];
 		const result = stripNewLinePrefixes(lines);
 		expect(result[0]).toBe("---");
 		expect(result[1]).toBe("title: example");
@@ -974,7 +988,7 @@ describe("stripNewLinePrefixes", () => {
 	});
 
 	it("strips Cursor N| prefix combined with hashline prefix (N|N#XX:content)", () => {
-		const lines = ["     1|1#BQ:---", "     2|2#XS:title: example", "     3|3#BQ:---"];
+		const lines = ["     1|1#an:---", "     2|2#re:title: example", "     3|3#an:---"];
 		const result = stripNewLinePrefixes(lines);
 		expect(result[0]).toBe("---");
 		expect(result[1]).toBe("title: example");
@@ -1004,12 +1018,12 @@ describe("stripNewLinePrefixes", () => {
 	// Cursor exec handler path: full file read with truncation
 	it("strips hashline prefixes from Cursor exec handler truncated read output (multi-line)", () => {
 		const lines = [
-			"1#BQ:---",
-			"2#XS:created: 2026-01-01",
-			"3#BQ:---",
+			"1#an:---",
+			"2#re:created: 2026-01-01",
+			"3#an:---",
 			"",
-			"5#VV:# Title",
-			"6#WQ:content here",
+			"5#on:# Title",
+			"6#at:content here",
 			"[Showing lines 1-6 of 100. Use sel=L7 to continue]",
 		];
 		const result = stripNewLinePrefixes(lines);
@@ -1019,11 +1033,11 @@ describe("stripNewLinePrefixes", () => {
 	// Second corruption cycle: nested hashline + truncation marker
 	it("strips double-nested hashline prefixes with truncation marker (second corruption cycle)", () => {
 		const lines = [
-			"1#NX:1#BQ:---",
-			"2#TY:2#XS:created: 2026-01-01",
-			"3#JZ:3#BQ:---",
+			"1#nd:1#an:---",
+			"2#ti:2#re:created: 2026-01-01",
+			"3#es:3#an:---",
 			"",
-			"5#ZZ:5#VV:# Title",
+			"5#or:5#on:# Title",
 			"[Showing lines 1-5 of 50. Use sel=L6 to continue]",
 		];
 		const result = stripNewLinePrefixes(lines);
@@ -1032,7 +1046,7 @@ describe("stripNewLinePrefixes", () => {
 
 	// Cursor read_lines N| combined with hashline (model mixes both outputs)
 	it("handles mixed N| and hashline from Cursor combining read_lines + read output", () => {
-		const lines = ["  1|1#BQ:---", "  2|2#XS:title: test", "  3|3#BQ:---", "  4|", "  5|5#VV:# Heading"];
+		const lines = ["  1|1#an:---", "  2|2#re:title: test", "  3|3#an:---", "  4|", "  5|5#on:# Heading"];
 		const result = stripNewLinePrefixes(lines);
 		expect(result).toEqual(["---", "title: test", "---", "", "# Heading"]);
 	});
@@ -1044,7 +1058,7 @@ describe("stripNewLinePrefixes", () => {
 
 describe("stripHashlinePrefixes", () => {
 	it("strips when all non-empty lines have hashline prefixes", () => {
-		const lines = ["1#BQ:---", "2#XS:title", "", "4#VV:content"];
+		const lines = ["1#an:---", "2#re:title", "", "4#on:content"];
 		expect(stripHashlinePrefixes(lines)).toEqual(["---", "title", "", "content"]);
 	});
 
@@ -1055,9 +1069,9 @@ describe("stripHashlinePrefixes", () => {
 
 	it("strips hashline prefixes even when truncation marker is present (anchor corruption bug)", () => {
 		const lines = [
-			"1#BQ:---",
-			"2#XS:title: example",
-			"3#BQ:---",
+			"1#an:---",
+			"2#re:title: example",
+			"3#an:---",
 			"",
 			"[Showing lines 1-300 of 332. Use sel=L301 to continue]",
 		];
@@ -1068,14 +1082,14 @@ describe("stripHashlinePrefixes", () => {
 	});
 
 	it("strips nested hashline prefixes from already-corrupted content", () => {
-		const lines = ["1#NX:1#BQ:---", "2#TY:2#XS:title"];
+		const lines = ["1#nd:1#an:---", "2#ti:2#re:title"];
 		const result = stripHashlinePrefixes(lines);
 		expect(result[0]).toBe("---");
 		expect(result[1]).toBe("title");
 	});
 
 	it("strips Cursor N| prefix combined with hashline in write content", () => {
-		const lines = ["     1|1#BQ:---", "     2|2#XS:title", "", "     4|4#VV:content"];
+		const lines = ["     1|1#an:---", "     2|2#re:title", "", "     4|4#on:content"];
 		const result = stripHashlinePrefixes(lines);
 		expect(result).toEqual(["---", "title", "", "content"]);
 	});
@@ -1095,12 +1109,12 @@ describe("stripHashlinePrefixes", () => {
 	// Cursor write path: full read output paste-back with truncation
 	it("strips full hashline read output pasted into write tool (Cursor scenario)", () => {
 		const lines = [
-			"1#BQ:---",
-			"2#XS:title: my-doc",
-			"3#BQ:---",
+			"1#an:---",
+			"2#re:title: my-doc",
+			"3#an:---",
 			"",
-			"5#VV:Some content",
-			"6#WQ:More content",
+			"5#on:Some content",
+			"6#at:More content",
 			"[42 more lines in file. Use sel=L7 to continue]",
 		];
 		const result = stripHashlinePrefixes(lines);
@@ -1109,7 +1123,7 @@ describe("stripHashlinePrefixes", () => {
 
 	// Cursor write path: double-nested hashline from corruption cycle
 	it("strips double-nested hashline prefixes in write content (corruption cycle)", () => {
-		const lines = ["1#NX:1#BQ:---", "2#TY:2#XS:title", "", "4#ZZ:4#VV:content"];
+		const lines = ["1#nd:1#an:---", "2#ti:2#re:title", "", "4#or:4#on:content"];
 		const result = stripHashlinePrefixes(lines);
 		expect(result).toEqual(["---", "title", "", "content"]);
 	});
@@ -1130,12 +1144,12 @@ describe("hashlineParseContent", () => {
 	});
 
 	it("strips hashline prefixes from array input when all non-empty lines are prefixed", () => {
-		const input = ["259#WQ:", "260#TZ:{{/*", "261#HX:OC deployment container livenessProbe template"];
+		const input = ["259#th:", "260#er:{{/*", "261#in:OC deployment container livenessProbe template"];
 		expect(hashlineParseText(input)).toEqual(["", "{{/*", "OC deployment container livenessProbe template"]);
 	});
 
 	it("strips hash-only prefixes from array input when all non-empty lines are prefixed", () => {
-		const input = ["#WQ:", "#TZ:{{/*", "#HX:OC deployment container livenessProbe template"];
+		const input = ["#th:", "#er:{{/*", "#in:OC deployment container livenessProbe template"];
 		expect(hashlineParseText(input)).toEqual(["", "{{/*", "OC deployment container livenessProbe template"]);
 	});
 
@@ -1186,8 +1200,9 @@ describe("hashlineParseContent", () => {
 	});
 
 	it("preserves comment lines starting with '# Word:' through hashlineParseText", () => {
-		// Regression: HASHLINE_PREFIX_RE matched '# Note:', '# TODO:', etc. because the
-		// hash ID segment was [0-9a-zA-Z]{1,16} instead of [ZPMQVRWSNKTXJBYH]{2}.
+		// Regression: HASHLINE_PREFIX_RE used to match '# Note:', '# TODO:', etc. because the
+		// hash ID segment was overly permissive ([0-9a-zA-Z]{1,16}). It now matches only the
+		// 40-bigram alphabet from HASHLINE_BIGRAMS, so accidental colon-suffixed words don't strip.
 		expect(hashlineParseText(["  # Note: Using version 1.24.x"])).toEqual(["  # Note: Using version 1.24.x"]);
 		expect(hashlineParseText(["# TODO: remove this"])).toEqual(["# TODO: remove this"]);
 		expect(hashlineParseText(["# step: install deps"])).toEqual(["# step: install deps"]);
@@ -1230,7 +1245,7 @@ describe("hashlineParseContent", () => {
 
 	// Cursor edit path: model pastes hashline-prefixed content as string
 	it("strips hashline prefixes from Cursor edit content string input", () => {
-		const input = "1#BQ:---\n2#XS:title\n3#BQ:---";
+		const input = "1#an:---\n2#re:title\n3#an:---";
 		const result = hashlineParseText(input);
 		expect(result).toEqual(["---", "title", "---"]);
 	});
@@ -1244,14 +1259,14 @@ describe("hashlineParseContent", () => {
 
 	// Cursor edit path: model pastes N| + hashline combined content as string
 	it("strips N| + hashline combined prefixes from Cursor edit content string", () => {
-		const input = "     1|1#BQ:---\n     2|2#XS:title\n     3|3#BQ:---";
+		const input = "     1|1#an:---\n     2|2#re:title\n     3|3#an:---";
 		const result = hashlineParseText(input);
 		expect(result).toEqual(["---", "title", "---"]);
 	});
 
 	// Cursor edit path: content with truncation marker in string input
 	it("strips hashline prefixes and truncation marker from Cursor edit string input", () => {
-		const input = "1#BQ:line one\n2#XS:line two\n[Showing lines 1-2 of 50. Use sel=L3 to continue]";
+		const input = "1#an:line one\n2#re:line two\n[Showing lines 1-2 of 50. Use sel=L3 to continue]";
 		const result = hashlineParseText(input);
 		expect(result).toEqual(["line one", "line two"]);
 	});

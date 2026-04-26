@@ -1,4 +1,4 @@
-use crate::chunk::types::ChunkTree;
+use crate::chunk::{HASHLINE_BIGRAMS, types::ChunkTree};
 
 const DEFAULT_SPACE_INDENT_STEP: usize = 4;
 const MAX_REASONABLE_INDENT_STEP: usize = 8;
@@ -386,8 +386,6 @@ fn strip_new_line_prefixes(lines: &[String]) -> Vec<String> {
 }
 
 fn hashline_prefix_len(line: &str) -> Option<usize> {
-	const HASHLINE_NIBBLES: &str = "ZPMQVRWSNKTXJBYH";
-
 	let mut offset = line.len() - line.trim_start_matches([' ', '\t']).len();
 	let mut remainder = &line[offset..];
 
@@ -433,14 +431,18 @@ fn hashline_prefix_len(line: &str) -> Option<usize> {
 		return None;
 	}
 
-	let mut chars = remainder.chars();
-	let first = chars.next()?;
-	let second = chars.next()?;
-	if !HASHLINE_NIBBLES.contains(first) || !HASHLINE_NIBBLES.contains(second) {
+	// Match exactly one BPE bigram (2 ASCII chars) from HASHLINE_BIGRAMS.
+	// Use char-boundary-safe slicing to avoid panicking on multi-byte content.
+	let bigram_end = 2;
+	if remainder.len() < bigram_end || !remainder.is_char_boundary(bigram_end) {
 		return None;
 	}
-	offset += first.len_utf8() + second.len_utf8();
-	remainder = &remainder[first.len_utf8() + second.len_utf8()..];
+	let bigram = &remainder[..bigram_end];
+	if !bigram.is_ascii() || !HASHLINE_BIGRAMS.contains(&bigram) {
+		return None;
+	}
+	offset += bigram_end;
+	remainder = &remainder[bigram_end..];
 
 	remainder.strip_prefix(':').map(|_| offset + 1)
 }
@@ -554,10 +556,10 @@ mod tests {
 			parse_error_lines: Vec::new(),
 			fallback:          false,
 			root_path:         String::new(),
-			root_children:     vec!["class_A".to_owned()],
+			root_children:     vec!["cls_A".to_owned()],
 			chunks:            vec![
-				chunk("class_A", Some(""), &["fn_b"], 0, " "),
-				chunk("fn_b", Some("class_A"), &[], 2, " "),
+				chunk("cls_A", Some(""), &["fn_b"], 0, " "),
+				chunk("fn_b", Some("cls_A"), &[], 2, " "),
 			],
 		};
 		assert_eq!(detect_file_indent_step("", &tree), 2);
@@ -575,8 +577,8 @@ mod tests {
 			parse_error_lines: Vec::new(),
 			fallback:          false,
 			root_path:         String::new(),
-			root_children:     vec!["key_server".to_owned()],
-			chunks:            vec![chunk("key_server", Some(""), &[], 0, " ")],
+			root_children:     vec!["key_ser".to_owned()],
+			chunks:            vec![chunk("key_ser", Some(""), &[], 0, " ")],
 		};
 		let source = "server:\n  host: localhost\n  port: 5432\n";
 		assert_eq!(detect_file_indent_step(source, &tree), 2);
@@ -592,8 +594,8 @@ mod tests {
 			parse_error_lines: Vec::new(),
 			fallback:          false,
 			root_path:         String::new(),
-			root_children:     vec!["fn_main".to_owned()],
-			chunks:            vec![chunk("fn_main", Some(""), &[], 0, "")],
+			root_children:     vec!["fn_mai".to_owned()],
+			chunks:            vec![chunk("fn_mai", Some(""), &[], 0, "")],
 		};
 
 		let source = "fn main() {\n    println!(\"hi\");\n}\n";

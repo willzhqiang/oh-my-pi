@@ -3,7 +3,7 @@
  *
  * Used by the reviewer agent to report findings in a structured way.
  * Hidden by default - only enabled when explicitly listed in agent's tools.
- * Reviewers finish via `submit_result` tool with SubmitReviewDetails schema.
+ * Reviewers finish via `yield` tool with SubmitReviewDetails schema.
  */
 // ─────────────────────────────────────────────────────────────────────────────
 // Subprocess tool handlers - registered for extraction/rendering in task tool
@@ -68,7 +68,7 @@ const ReportFindingParams = Type.Object({
 		maximum: 1,
 		description: "Confidence score 0.0-1.0",
 	}),
-	file_path: Type.String({ description: "Absolute path to the file" }),
+	file_path: Type.String({ description: "Path to the file" }),
 	line_start: Type.Number({ description: "Start line of the issue" }),
 	line_end: Type.Number({ description: "End line of the issue" }),
 });
@@ -131,7 +131,7 @@ export function parseReportFindingDetails(value: unknown): ReportFindingDetails 
 export const reportFindingTool: AgentTool<typeof ReportFindingParams, ReportFindingDetails, Theme> = {
 	name: "report_finding",
 	label: "Report Finding",
-	description: "Report a code review finding. Use this for each issue found. Call submit_result when done.",
+	description: "Report a code review finding. Use this for each issue found. Call yield when done.",
 	parameters: ReportFindingParams,
 	async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 		const { title, body, priority, confidence, file_path, line_start, line_end } = params;
@@ -186,7 +186,7 @@ export const reportFindingTool: AgentTool<typeof ReportFindingParams, ReportFind
 	},
 };
 
-/** SubmitReviewDetails - used for rendering review results from submit_result tool */
+/** SubmitReviewDetails - used for rendering review results from yield tool */
 export interface SubmitReviewDetails {
 	overall_correctness: "correct" | "incorrect";
 	explanation: string;

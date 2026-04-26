@@ -132,7 +132,7 @@ import { resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import type { CheckpointState } from "../tools/checkpoint";
 import { outputMeta } from "../tools/output-meta";
-import { resolveToCwd } from "../tools/path-utils";
+import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
 import { getLatestTodoPhasesFromEntries, type TodoItem, type TodoPhase } from "../tools/todo-write";
 import { ToolError } from "../tools/tool-errors";
@@ -1176,6 +1176,29 @@ export class AgentSession {
 				generation: options?.generation,
 				onSkip: options?.onSkip,
 			},
+		);
+	}
+
+	#scheduleAutoContinuePrompt(generation: number): void {
+		const continuePrompt = async () => {
+			await this.#promptWithMessage(
+				{
+					role: "developer",
+					content: [{ type: "text", text: "Continue if you have next steps." }],
+					attribution: "agent",
+					timestamp: Date.now(),
+				},
+				"Continue if you have next steps.",
+				{ skipPostPromptRecoveryWait: true },
+			);
+		};
+		this.#schedulePostPromptTask(
+			async signal => {
+				await Promise.resolve();
+				if (signal.aborted) return;
+				await continuePrompt();
+			},
+			{ generation },
 		);
 	}
 
@@ -2445,8 +2468,8 @@ export class AgentSession {
 		const state = this.#planModeState;
 		if (!state?.enabled) return null;
 		const sessionPlanUrl = "local://PLAN.md";
-		const resolvedPlanPath = state.planFilePath.startsWith("local://")
-			? resolveLocalUrlToPath(state.planFilePath, {
+		const resolvedPlanPath = state.planFilePath.startsWith("local:")
+			? resolveLocalUrlToPath(normalizeLocalScheme(state.planFilePath), {
 					getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
 					getSessionId: () => this.sessionManager.getSessionId(),
 				})
@@ -2456,7 +2479,7 @@ export class AgentSession {
 			getSessionId: () => this.sessionManager.getSessionId(),
 		});
 		const displayPlanPath =
-			state.planFilePath.startsWith("local://") || resolvedPlanPath !== resolvedSessionPlan
+			state.planFilePath.startsWith("local:") || resolvedPlanPath !== resolvedSessionPlan
 				? state.planFilePath
 				: sessionPlanUrl;
 
@@ -4813,6 +4836,9 @@ export class AgentSession {
 						aborted: false,
 						willRetry: false,
 					});
+					if (!autoCompactionSignal.aborted && reason !== "idle" && compactionSettings.autoContinue !== false) {
+						this.#scheduleAutoContinuePrompt(generation);
+					}
 					return;
 				}
 			}
@@ -5064,26 +5090,7 @@ export class AgentSession {
 			await this.#emitSessionEvent({ type: "auto_compaction_end", action, result, aborted: false, willRetry });
 
 			if (!willRetry && reason !== "idle" && compactionSettings.autoContinue !== false) {
-				const continuePrompt = async () => {
-					await this.#promptWithMessage(
-						{
-							role: "developer",
-							content: [{ type: "text", text: "Continue if you have next steps." }],
-							attribution: "agent",
-							timestamp: Date.now(),
-						},
-						"Continue if you have next steps.",
-						{ skipPostPromptRecoveryWait: true },
-					);
-				};
-				this.#schedulePostPromptTask(
-					async signal => {
-						await Promise.resolve();
-						if (signal.aborted) return;
-						await continuePrompt();
-					},
-					{ generation },
-				);
+				this.#scheduleAutoContinuePrompt(generation);
 			}
 
 			if (willRetry) {
@@ -5604,6 +5611,14 @@ export class AgentSession {
 	// Bash Execution
 	// =========================================================================
 
+	async #saveBashOriginalArtifact(originalText: string): Promise<string | undefined> {
+		try {
+			return await this.sessionManager.saveArtifact(originalText, "bash-original");
+		} catch {
+			return undefined;
+		}
+	}
+
 	/**
 	 * Execute a bash command.
 	 * Adds result to agent context and session.
@@ -5640,6 +5655,7 @@ export class AgentSession {
 				signal: this.#bashAbortController.signal,
 				sessionKey: this.sessionId,
 				timeout: clampTimeout("bash") * 1000,
+				onMinimizedSave: originalText => this.#saveBashOriginalArtifact(originalText),
 			});
 
 			this.recordBashResult(command, result, options);

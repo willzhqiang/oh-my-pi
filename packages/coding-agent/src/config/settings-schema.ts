@@ -1,4 +1,5 @@
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
+import { TASK_SIMPLE_MODES } from "../task/simple-mode";
 
 /** Unified settings schema - single source of truth for all settings.
  * Unified settings schema - single source of truth for all settings.
@@ -885,6 +886,8 @@ export const SETTINGS_SCHEMA = {
 
 	"memories.rolloutPayloadPercent": { type: "number", default: 0.7 },
 
+	"memories.phase1InputTokenLimit": { type: "number", default: 4000 },
+
 	"memories.fallbackTokenLimit": { type: "number", default: 16000 },
 
 	"memories.summaryInjectionTokenLimit": { type: "number", default: 5000 },
@@ -952,12 +955,12 @@ export const SETTINGS_SCHEMA = {
 	// Edit tool
 	"edit.mode": {
 		type: "enum",
-		values: ["replace", "patch", "hashline", "chunk", "vim"] as const,
+		values: ["replace", "patch", "hashline", "chunk", "vim", "apply_patch"] as const,
 		default: "hashline",
 		ui: {
 			tab: "editing",
 			label: "Edit Mode",
-			description: "Select the edit tool variant (replace, patch, hashline, chunk, or vim)",
+			description: "Select the edit tool variant (replace, patch, hashline, chunk, vim, or apply_patch)",
 		},
 	},
 
@@ -1030,6 +1033,16 @@ export const SETTINGS_SCHEMA = {
 			label: "Default Read Limit",
 			description: "Default number of lines returned when agent calls read without a limit",
 			submenu: true,
+		},
+	},
+
+	"read.toolResultPreview": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "editing",
+			label: "Inline Read Previews",
+			description: "Render read tool results inline in the transcript instead of summary rows",
 		},
 	},
 
@@ -1109,6 +1122,39 @@ export const SETTINGS_SCHEMA = {
 		ui: { tab: "editing", label: "Bash Interceptor", description: "Block shell commands that have dedicated tools" },
 	},
 	"bashInterceptor.patterns": { type: "array", default: DEFAULT_BASH_INTERCEPTOR_RULES },
+
+	// Shell output minimizer
+	"shellMinimizer.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "editing",
+			label: "Shell Minimizer",
+			description: "Compress verbose shell output (git, npm, cargo, etc.) before returning it to the agent",
+		},
+	},
+	"shellMinimizer.settingsPath": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "editing",
+			label: "Minimizer Settings Path",
+			description: "Optional TOML file with per-command minimizer overrides",
+			submenu: true,
+		},
+	},
+	"shellMinimizer.only": { type: "array", default: EMPTY_STRING_ARRAY },
+	"shellMinimizer.except": { type: "array", default: EMPTY_STRING_ARRAY },
+	"shellMinimizer.maxCaptureBytes": {
+		type: "number",
+		default: 4 * 1024 * 1024,
+		ui: {
+			tab: "editing",
+			label: "Minimizer Capture Limit",
+			description: "Maximum captured output bytes before falling back to raw streaming",
+			submenu: true,
+		},
+	},
 
 	// Python
 	"python.toolMode": {
@@ -1302,7 +1348,8 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "tools",
 			label: "GitHub CLI",
-			description: "Enable read-only gh_* tools for GitHub repository, issue, pull request, diff, and search access",
+			description:
+				"Enable gh_* tools for GitHub repository, issue, pull request, diff, search, checkout, and PR push workflows",
 		},
 	},
 
@@ -1506,6 +1553,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.simple": {
+		type: "enum",
+		values: TASK_SIMPLE_MODES,
+		default: "default",
+		ui: {
+			tab: "tasks",
+			label: "Task Input Mode",
+			description: "How much shared structure the task tool accepts (default, schema-free, or independent)",
+			submenu: true,
+		},
+	},
+
 	"task.maxConcurrency": {
 		type: "number",
 		default: 32,
@@ -1585,6 +1644,22 @@ export const SETTINGS_SCHEMA = {
 		type: "boolean",
 		default: true,
 		ui: { tab: "tasks", label: "Claude Project Commands", description: "Load commands from .claude/commands/" },
+	},
+
+	"commands.enableOpencodeUser": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			label: "OpenCode User Commands",
+			description: "Load commands from ~/.config/opencode/commands/",
+		},
+	},
+
+	"commands.enableOpencodeProject": {
+		type: "boolean",
+		default: true,
+		ui: { tab: "tasks", label: "OpenCode Project Commands", description: "Load commands from .opencode/commands/" },
 	},
 
 	// ────────────────────────────────────────────────────────────────────────
@@ -1931,6 +2006,14 @@ export interface BashInterceptorRule {
 	allowSubcommands?: string[];
 }
 
+export interface ShellMinimizerSettings {
+	enabled: boolean;
+	settingsPath: string | undefined;
+	only: string[];
+	except: string[];
+	maxCaptureBytes: number;
+}
+
 /** Map group prefix -> typed settings interface */
 export interface GroupTypeMap {
 	compaction: CompactionSettings;
@@ -1948,6 +2031,7 @@ export interface GroupTypeMap {
 	modelRoles: Record<string, string>;
 	modelTags: ModelTagsSettings;
 	cycleOrder: string[];
+	shellMinimizer: ShellMinimizerSettings;
 }
 
 export type GroupPrefix = keyof GroupTypeMap;
