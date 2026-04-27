@@ -583,6 +583,7 @@ export class TodoWriteTool implements AgentTool<typeof todoWriteSchema, TodoWrit
 	readonly parameters = todoWriteSchema;
 	readonly concurrency = "exclusive";
 	readonly strict = true;
+	readonly intent = "omit" as const;
 
 	constructor(private readonly session: ToolSession) {
 		this.description = prompt.render(todoWriteDescription);
@@ -716,7 +717,6 @@ export const todoWriteToolRenderer = {
 		const lines: string[] = [header];
 		for (let p = 0; p < phases.length; p++) {
 			const phase = phases[p];
-			if (p > 0) lines.push("");
 			if (phases.length > 1) {
 				lines.push(uiTheme.fg("accent", chalk.bold(`  ${phase.name}`)));
 			}

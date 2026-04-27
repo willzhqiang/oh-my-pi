@@ -84,7 +84,7 @@ describe("search tool path lists", () => {
 		expect(text).toContain("# apps");
 		expect(text).toContain("# packages");
 		expect(text).toContain("# phases");
-		expect(text).toContain("## └─ grep.txt");
+		expect(text).toContain("## grep.txt");
 		expect(text).not.toContain("# other");
 		expect(details?.fileCount).toBe(3);
 		expect(details?.scopePath).toBe("apps/, packages/, phases/");
@@ -162,7 +162,7 @@ describe("search tool path lists", () => {
 		expect(text).toContain("# apps");
 		expect(text).toContain("# packages");
 		expect(text).toContain("# phases");
-		expect(text).toContain("## └─ ast.ts");
+		expect(text).toContain("## ast.ts");
 		expect(text).not.toContain("# other");
 		expect(details?.fileCount).toBe(3);
 		expect(details?.scopePath).toBe("apps/**/*.ts, packages/**/*.ts, phases/**/*.ts");
@@ -191,7 +191,7 @@ describe("search tool path lists", () => {
 		expect(text).toContain("# apps");
 		expect(text).toContain("# packages");
 		expect(text).toContain("# phases");
-		expect(text).toContain("## └─ ast.ts (1 replacement)");
+		expect(text).toContain("## ast.ts (1 replacement)");
 		expect(text).not.toContain("# other");
 		expect(details?.totalReplacements).toBe(3);
 		expect(details?.scopePath).toBe("apps/**/*.ts, packages/**/*.ts, phases/**/*.ts");
@@ -326,7 +326,7 @@ describe("search tool path lists", () => {
 		}
 	});
 
-	it("grep explains context-line gutters without changing match and context separators", async () => {
+	it("grep explains match and context gutters with new format", async () => {
 		await Bun.write(path.join(tempDir, "context.txt"), "#if FLAG\nneedle\n#endif\n");
 
 		const tools = await createTools(
@@ -344,9 +344,8 @@ describe("search tool path lists", () => {
 		});
 		const text = getText(result);
 
-		expect(text).toContain("match lines use '>'; context lines use ':'");
-		expect(text).toMatch(/1(?:[a-z]{2})?:#if FLAG/);
-		expect(text).toMatch(/2(?:[a-z]{2})?>needle/);
-		expect(text).toMatch(/3(?:[a-z]{2})?:#endif/);
+		expect(text).toMatch(/ 1(?:[a-z]{2})?\|#if FLAG/);
+		expect(text).toMatch(/\*2(?:[a-z]{2})?\|needle/);
+		expect(text).toMatch(/ 3(?:[a-z]{2})?\|#endif/);
 	});
 });

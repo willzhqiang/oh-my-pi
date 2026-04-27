@@ -11,11 +11,10 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
-import { CancelJobTool } from "@oh-my-pi/pi-coding-agent/tools/cancel-job";
 import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/find";
 import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
+import { JobTool } from "@oh-my-pi/pi-coding-agent/tools/job";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
-import { PollTool } from "@oh-my-pi/pi-coding-agent/tools/poll-tool";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { ReadLinesTool } from "@oh-my-pi/pi-coding-agent/tools/read-lines";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
@@ -335,9 +334,7 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 1");
 			expect(output).toContain(`Line ${defaultLimit}`);
 			expect(output).not.toContain(`Line ${defaultLimit + 1}`);
-			expect(output).toContain(
-				`[Showing lines 1-${defaultLimit} of 3500. Use sel=L${defaultLimit + 1} to continue]`,
-			);
+			expect(output).toContain(`[Showing lines 1-${defaultLimit} of 3500. Use sel=${defaultLimit + 1} to continue]`);
 		});
 
 		it("should truncate when byte limit exceeded", async () => {
@@ -351,9 +348,7 @@ describe("Coding Agent Tools", () => {
 
 			expect(output).toContain("Line 1:");
 			// Should show byte limit message
-			expect(output).toMatch(
-				/\[Showing lines 1-\d+ of 1000 \(\d+(\.\d+)?\s*KB limit\)\. Use sel=L\d+ to continue\]/,
-			);
+			expect(output).toMatch(/\[Showing lines 1-\d+ of 1000 \(\d+(\.\d+)?\s*KB limit\)\. Use sel=\d+ to continue\]/);
 		});
 
 		it("should handle offset parameter", async () => {
@@ -382,7 +377,7 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 1");
 			expect(output).toContain("Line 10");
 			expect(output).not.toContain("Line 11");
-			expect(output).toContain("[Showing lines 1-10 of 100. Use sel=L11 to continue]");
+			expect(output).toContain("[Showing lines 1-10 of 100. Use sel=11 to continue]");
 		});
 
 		it("should handle offset + limit together", async () => {
@@ -400,7 +395,7 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 41");
 			expect(output).toContain("Line 60");
 			expect(output).not.toContain("Line 61");
-			expect(output).toContain("[Showing lines 41-60 of 100. Use sel=L61 to continue]");
+			expect(output).toContain("[Showing lines 41-60 of 100. Use sel=61 to continue]");
 		});
 
 		it("should show error when offset is beyond file length", async () => {
@@ -411,7 +406,7 @@ describe("Coding Agent Tools", () => {
 			const output = getTextOutput(result);
 
 			expect(output).toContain("Line 100 is beyond end of file (3 lines total)");
-			expect(output).toContain("Use sel=L1 to read from the start, or sel=L3 to read the last line.");
+			expect(output).toContain("Use sel=1 to read from the start, or sel=3 to read the last line.");
 		});
 
 		it("should include truncation details when truncated", async () => {
@@ -509,7 +504,7 @@ describe("Coding Agent Tools", () => {
 				expect(output).toContain("# Archive README");
 				expect(output).toContain("Line 2");
 				expect(output).not.toContain("Line 3");
-				expect(output).toContain("Use sel=L3");
+				expect(output).toContain("Use sel=3");
 			});
 		}
 
@@ -1134,12 +1129,11 @@ function b() {
 				Settings.isolated({ "bash.autoBackground.enabled": true }),
 			);
 
-			expect(PollTool.createIf(autoBackgroundSession)).not.toBeNull();
-			expect(CancelJobTool.createIf(autoBackgroundSession)).not.toBeNull();
+			expect(JobTool.createIf(autoBackgroundSession)).not.toBeNull();
 		});
 	});
 
-	describe("PollTool", () => {
+	describe("JobTool", () => {
 		it("should wait for jobs and acknowledge deliveries to prevent race conditions", async () => {
 			const manager = new AsyncJobManager({
 				onJobComplete: async () => {},
@@ -1147,12 +1141,12 @@ function b() {
 			const session = createTestToolSession(testDir, Settings.isolated({ "bash.autoBackground.enabled": true }), {
 				asyncJobManager: manager,
 			});
-			const pollTool = PollTool.createIf(session)!;
+			const jobTool = JobTool.createIf(session)!;
 
 			const jobId = manager.register("bash", "test job", async () => "success");
 
 			// Job is running, call poll
-			const resultPromise = pollTool.execute("test-call-poll-1", { jobs: [jobId] });
+			const resultPromise = jobTool.execute("test-call-poll-1", { poll: [jobId] });
 
 			// Ensure poll finished
 			const result = await resultPromise;
@@ -1179,7 +1173,7 @@ function b() {
 			const output = getTextOutput(result);
 			expect(output).not.toContain("# example.txt");
 			// PI_EDIT_VARIANT=replace in beforeEach disables hashlines; expect line-number mode
-			expect(output).toMatch(/\b2>match line/);
+			expect(output).toMatch(/\*2\|match line/);
 		});
 
 		it("should accept wildcard patterns in the path parameter", async () => {
@@ -1215,8 +1209,8 @@ function b() {
 			});
 
 			const output = getTextOutput(result);
-			expect(output).toContain("## └─ root.ts");
-			expect(output).toContain("## └─ child.d.ts");
+			expect(output).toContain("## root.ts");
+			expect(output).toContain("## child.d.ts");
 			expect(output).not.toContain("ignore.js");
 			expect(output).not.toContain("outside.ts");
 			expect(result.details?.fileCount).toBe(2);
@@ -1236,10 +1230,10 @@ function b() {
 
 			const output = getTextOutput(result);
 			expect(output).not.toContain("# context.txt");
-			expect(output).toMatch(/\b1:before/);
-			expect(output).toMatch(/\b2>match one/);
-			expect(output).toMatch(/\b3:after/);
-			expect(output).toMatch(/\b5>match two/);
+			expect(output).toMatch(/ 1\|before/);
+			expect(output).toMatch(/\*2\|match one/);
+			expect(output).toMatch(/ 3\|after/);
+			expect(output).toMatch(/\*5\|match two/);
 		});
 
 		it("should skip matches with the skip parameter", async () => {
@@ -1315,8 +1309,8 @@ function b() {
 
 			const output = getTextOutput(result);
 			expect(output).toContain("# packages/ai");
-			expect(output).toContain("## └─ CHANGELOG.md");
-			expect(output).toContain("## └─ models.json");
+			expect(output).toContain("## CHANGELOG.md");
+			expect(output).toContain("## models.json");
 			expect(result.details?.fileCount).toBeGreaterThanOrEqual(2);
 		});
 
@@ -1377,7 +1371,7 @@ function b() {
 			expect(output).toContain("match.txt");
 			expect(output).toContain("needle kept");
 			expect(output).not.toContain("blocked.fifo");
-			expect(output).not.toContain("## └─ blocked.fifo");
+			expect(output).not.toContain("## blocked.fifo");
 			expect(result.details?.fileCount).toBe(1);
 			expect(result.details?.matchCount).toBe(1);
 		});

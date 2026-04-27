@@ -36,6 +36,7 @@ import { loginAnthropic } from "./utils/oauth/anthropic";
 import { loginCerebras } from "./utils/oauth/cerebras";
 import { loginCloudflareAiGateway } from "./utils/oauth/cloudflare-ai-gateway";
 import { loginCursor } from "./utils/oauth/cursor";
+import { loginFireworks } from "./utils/oauth/fireworks";
 import { loginGitHubCopilot } from "./utils/oauth/github-copilot";
 import { loginGitLabDuo } from "./utils/oauth/gitlab-duo";
 import { loginAntigravity } from "./utils/oauth/google-antigravity";
@@ -51,6 +52,7 @@ import { loginMoonshot } from "./utils/oauth/moonshot";
 import { loginNanoGPT } from "./utils/oauth/nanogpt";
 import { loginNvidia } from "./utils/oauth/nvidia";
 import { loginOllama } from "./utils/oauth/ollama";
+import { loginOllamaCloud } from "./utils/oauth/ollama-cloud";
 import { loginOpenAICodex } from "./utils/oauth/openai-codex";
 import { loginOpenCode } from "./utils/oauth/opencode";
 import { loginParallel } from "./utils/oauth/parallel";
@@ -838,8 +840,18 @@ export class AuthStorage {
 				await saveApiKeyCredential(apiKey);
 				return;
 			}
+			case "ollama-cloud": {
+				const apiKey = await loginOllamaCloud(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
 			case "cerebras": {
 				const apiKey = await loginCerebras(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
+			case "fireworks": {
+				const apiKey = await loginFireworks(ctrl);
 				await saveApiKeyCredential(apiKey);
 				return;
 			}

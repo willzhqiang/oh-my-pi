@@ -2,6 +2,75 @@
 
 ## [Unreleased]
 
+## [14.5.3] - 2026-04-27
+
+### Added
+
+- Added bracketed `loc` forms `(anchor)`, `[anchor]`, `[anchor`, `(anchor`, `anchor]`, and `anchor)` to `atom` `splice` editing so a single anchor can target a block body, whole node, or partial node region
+- Added automatic block-delimiter inference for block splices using file extension, defaulting to `{` and using `(` for Lisp-family files
+- Added optional `pre`/`post` arguments to the `href` prompt helper so hashline references can be wrapped as bracketed or parenthesized anchors
+- Added destination-aware indent handling for block replacements by detecting file indent style and reapplying tabs/spaces to spliced body text
+
+### Changed
+
+- Changed bracketed atom locators to be `splice`-only and reject `pre`, `post`, or `sed` on region locators
+- Changed `applyAtomEdits` to forbid mixing `splice_block` with other anchor-scoped edit verbs in one call
+- Changed `splice_block` resolution behavior to include selected block range and enclosing-count context in warning output
+- Changed balanced-block parsing to support `kind` selection (`{`, `(`, `[`), nesting depth, and safer same-line enclosing selection
+
+### Removed
+
+- Removed the `sed` `F` option for literal matching; `sed` now accepts only `pat`, `rep`, and optional `g`, with `F`-style literal matching no longer supported
+
+### Fixed
+
+- Fixed `splice_block` multi-line replacements to replace the exact target region and avoid duplicate braces or duplicated signature lines from bare-anchor `splice` attempts
+- Fixed false-positive “unbalanced” replacement-body warnings caused by braces in regex/string/comment text by skipping those constructs during block scanning
+- Fixed `splice_block` for same-line `(` bodies so inline call sites like `int(port)` can be replaced correctly
+
+## [14.5.2] - 2026-04-26
+### Breaking Changes
+
+- Removed support for sed-style string expressions and required `sed` to be specified as an object with `pat` and `rep` (and optional `g`, `F`, `i` flags)
+
+### Changed
+
+- Changed atom `sed` replacements to be global by default and require `g:false` for first-match-only replacements
+- Changed anchor validation so multiple `sed` operations can target the same line and run sequentially
+- Changed cross-entry conflict resolution so `del` edits on an anchor are ignored when that line is also replaced by `sed` or `splice` in another edit entry
+
+### Fixed
+
+- Fixed zero-length regex `sed` patterns (for example `()`, `^`, `$`) to fall back to literal substring matching instead of producing insertion-like replacements
+- Fixed `sed` chaining so each edit on the same anchor applies to the latest line state from prior replacements
+
+## [14.5.1] - 2026-04-26
+
+### Removed
+
+- Removed `\t` escaped-tab indentation autocorrect from hashline and atom edit modes (and the `PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS` environment toggle); literal `\t` in edit content is now preserved verbatim
+- Removed the suspicious-`\uDDDD` warning preflight from hashline edits
+- Removed the hand-rolled JSON unescape fallback in the streaming edit-arg renderer; partial fragments that fail `JSON.parse` are now surfaced raw rather than partially decoded with a non-spec-compliant unescaper that mishandled lone surrogates
+
+## [14.4.3] - 2026-04-26
+### Added
+
+- Added `irc` tool for agent-to-agent messaging with `list` and `send` operations, including optional broadcast to `all` and optional suppression of reply waits
+- Added `irc.enabled` tool setting (default `true`) to toggle agent-to-agent messaging
+- Added live in-chat rendering of IRC incoming and auto-reply messages so peer messages now appear in the session transcript
+
+### Changed
+
+- Changed peer-aware prompts for subagents to include currently live agent peers and IRC usage guidance when available
+- Changed the `/btw` helper to use a session-side ephemeral turn path that preserves streaming-context handling and updates the existing request handling behavior
+- Merged the `poll` and `cancel_job` tools into a single `job` tool that accepts `poll` and `cancel` arrays; the renamed tool reuses the richer poll renderer for both polling and cancellation calls
+
+### Fixed
+
+- Fixed IRC messaging to use a background ephemeral turn path so a recipient can reply even while its main loop is busy
+- Fixed `/btw` handling of empty prompts and missing model configuration by rejecting invalid requests before starting a stream
+- Fixed `/btw` request replacement so issuing a new query cleanly aborts the previous active request
+
 ## [14.4.2] - 2026-04-26
 ### Breaking Changes
 
@@ -735,6 +804,7 @@
 - Fixed PR checkout tool to resolve symlinks in worktree paths, ensuring consistent path references in results and metadata
 - Fixed `read` output for file-backed internal URLs like `local://...` to include hashline prefixes in hashline edit mode, preserving usable line refs for follow-up edits
 - Fixed the plan review selector to support the external editor shortcut for opening and updating the current plan from the approval screen
+- Fixed status line dropping git branch name when path is long by shrinking the path segment before dropping other segments
 
 ## [13.18.0] - 2026-04-02
 

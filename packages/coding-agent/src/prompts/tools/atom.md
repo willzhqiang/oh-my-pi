@@ -1,86 +1,76 @@
-Applies precise file edits using full anchors from `read` output (for example `160sr`).
+Applies precise file edits using anchors (line+hash).
 
-Read the file first. Copy the full anchors exactly as shown by `read`.
+<ops>
+Each call **MUST** have shape `{path:"a.ts",edits:[…]}`. `path` is the default file; you **MAY** override it per edit with `loc:"b.ts:160sr"`.
+Each edit **MUST** have exactly one `loc` and **MUST** include one or more verbs.
 
-<operations>
-**Top level**: `{ path, edits: […] }` — `path` is shared by all entries. You may still override the file inside `loc` with forms like `other.ts:160sr`.
+# Locators
+- `"A"` targets one anchored line. `"$"` targets the whole file: `pre` = BOF, `post` = EOF, `sed` = every line.
+- Bracketed locators are **`splice` only** and select a balanced region around anchor `A`.
+- `"(A)"` = block body. `"[A]"` = whole block/node.
+- `"[A"` / `"(A"` = tail after/including anchor, closer excluded.
+- `"A]"` / `"A)"` = head through/before anchor, opener excluded.
+- Anchor bracketed forms on a body line of the intended block, not the opener line.
+- Do not use bracketed locators on files that do not currently parse.
 
-Each entry has one shared locator plus one or more verbs:
-- `loc: "160sr"` — single anchored line
-- `loc: "$"` — whole file: `pre` prepends, `post` appends, `sed` substitutes across every line
-- `loc: "a.ts:160sr"` — cross-file override inside the locator
+# Verbs
+- `splice:[…]` replaces the anchored line, or the bracketed region. `[]` deletes; `[""]` makes a blank line.
+- `pre:[…]` inserts before the anchor, or BOF with `loc:"$"`.
+- `post:[…]` inserts after the anchor, or EOF with `loc:"$"`.
+</ops>
 
-Verbs:
-- `set: ["…"]` — replace the anchor line
-- `pre: ["…"]` — insert before the anchor line (or at BOF when `loc:"^"`)
-- `post: ["…"]` — insert after the anchor line (or at EOF when `loc:"$"`)
-- `sed: "s/foo/bar/"` — sed-style substitution applied to the anchor line. **Prefer this over `set` for token-level changes**
-Flags: `g` (all occurrences), `i` (case-insensitive), `F` (literal/fixed-string, no regex).
-Delimiter is whatever character follows `s`.
-You **MUST** keep the pattern as short as possible.
+<splice>
+Replaces the anchored line, or the bracketed region.
+- `[]` deletes. `[""]` leaves a blank line.
+- For bracketed `splice`, write body at column 0, it will be re-indented.
+- Do not use bracketed `splice` on broken files, or for single line edits.
+</splice>
 
-Combination rules:
-- On a single-anchor `loc`, you may combine `pre`, `set`, and `post` in the same entry.
-- `set: []` on a single-anchor `loc` deletes that line.
-- `set:[""]` is **not** delete — it replaces the line with a blank line.
-</operations>
+<sed>
+Use for tiny inline edits: names, operators, literals.
+- Keep `pat` as short as possible, it does not have to be unique.
+- `g:false` by default; set to replace all instead of first.
+</sed>
 
 <examples>
-All examples below reference the same file:
-
 ```ts title="a.ts"
-{{hline 1 "const tag = \"BAD\";"}}
+{{hline 1 "const FALLBACK = \"guest\";"}}
 {{hline 2 ""}}
-{{hline 3 "function beta(x) {"}}
-{{hline 4 "\tif (x) {"}}
-{{hline 5 "\t\treturn parse(data) || fallback;"}}
-{{hline 6 "\t}"}}
-{{hline 7 "\treturn null;"}}
-{{hline 8 "}"}}
+{{hline 3 "export function label(name) {"}}
+{{hline 4 "\tconst clean = name || FALLBACK;"}}
+{{hline 5 "\treturn clean.trim().toLowerCase();"}}
+{{hline 6 "}"}}
 ```
 
-# Replace a line with `set`
-`{path:"a.ts",edits:[{loc:{{href 1 "const tag = \"BAD\";"}},set:["const tag = \"OK\";"]}]}`
-
-# Combine `pre` + `set` + `post` in one entry
-`{path:"a.ts",edits:[{loc:{{href 4 "\tif (x) {"}},pre:["\tvalidate();"],set:["\tif (!x) {"],post:["\t\tlog();"]}]}`
-
-# Delete a line with `set: []`
-`{path:"a.ts",edits:[{loc:{{href 7 "\treturn null;"}},set:[]}]}`
-
-# Preserve a blank line with `set:[""]`
-`{path:"a.ts",edits:[{loc:{{href 2 ""}},set:[""]}]}`
-
-# Insert before / after a line
-`{path:"a.ts",edits:[{loc:{{href 3 "function beta(x) {"}},pre:["function gamma() {","\tvalidate();","}",""]}]}`
-
-# Substitute one token with `sed` (regex) — preferred for token-level edits
-Use the smallest pattern that uniquely identifies the change.
-`{path:"a.ts",edits:[{loc:{{href 5 "\t\treturn parse(data) || fallback;"}},sed:"s/\\|\\|/??/"}]}`
-
-# Substitute every occurrence with `sed` (literal/fixed-string)
-Use the `F` flag to disable regex; the delimiter can be any non-alphanumeric char.
-`{path:"a.ts",edits:[{loc:{{href 5 "\t\treturn parse(data) || fallback;"}},sed:"s|data|input|gF"}]}`
-
-# Prepend / append at file edges
+# Single-line replacement:
+`{path:"a.ts",edits:[{loc:{{href 1 "const FALLBACK = \"guest\";"}},splice:["const FALLBACK = \"anonymous\";"]}]}`
+# Small token edit: prefer `sed`:
+`{path:"a.ts",edits:[{loc:{{href 5 "\treturn clean.trim().toLowerCase();"}},sed:{pat:"toLowerCase",rep:"toUpperCase"}}]}`
+# Insert before / after an anchor:
+`{path:"a.ts",edits:[{loc:{{href 5 "\treturn clean.trim().toLowerCase();"}},pre:["\tif (!clean) return FALLBACK;"],post:["\t// normalized label"]}]}`
+# Delete a line vs make it blank:
+`{path:"a.ts",edits:[{loc:{{href 2 ""}},splice:[]}]}`
+`{path:"a.ts",edits:[{loc:{{href 2 ""}},splice:[""]}]}`
+# File edges:
 `{path:"a.ts",edits:[{loc:"$",pre:["// Copyright (c) 2026",""]}]}`
-`{path:"a.ts",edits:[{loc:"$",post:["","export const VERSION = \"1.0.0\";"]}]}`
-
-# Cross-file override inside `loc`
-`{path:"a.ts",edits:[{loc:"b.ts:{{href 1 "const tag = \"BAD\";"}}",set:["const tag = \"OK\";"]}]}`
+`{path:"a.ts",edits:[{loc:"$",post:["","export { FALLBACK };"]}]}`
+# Cross-file override:
+`{path:"a.ts",edits:[{loc:{{href 1 "const FALLBACK = \"guest\";" "config.ts:" ""}},splice:["const FALLBACK = \"anonymous\";"]}]}`
+# Body replacement: use bracketed `splice`, write body at column 0:
+`{path:"a.ts",edits:[{loc:{{href 4 "\tconst clean = name || FALLBACK;" "(" ")"}},splice:["if (name == null) return FALLBACK;","const clean = String(name).trim();","return clean || FALLBACK;"]}]}`
+# Whole function replacement: anchor on a body line:
+`{path:"a.ts",edits:[{loc:{{href 5 "\treturn clean.trim().toLowerCase();" "[" "]"}},splice:["export function label(name) {","\treturn String(name ?? FALLBACK).trim().toLowerCase();","}"]}]}`
+# WRONG: bare-anchor `splice` does not own neighboring lines:
+`{path:"a.ts",edits:[{loc:{{href 4 "\tconst clean = name || FALLBACK;"}},splice:["\tconst clean = String(name ?? FALLBACK).trim();","\treturn clean.toLowerCase();"]}]}`
+This replaces only line 4. Original line 5 still shifts down, so the function now has two returns.
+# RIGHT: use a body edit for that rewrite:
+`{path:"a.ts",edits:[{loc:{{href 4 "\tconst clean = name || FALLBACK;" "(" ")"}},splice:["const clean = String(name ?? FALLBACK).trim();","return clean.toLowerCase();"]}]}`
 </examples>
 
 <critical>
-- Make the minimum exact edit.
-- Copy the full anchors exactly as shown by `read/grep` (for example `160sr`, not just `sr`).
-- `loc` chooses the target. Verbs describe what to do there.
-- On a single-anchor `loc`, you may combine `pre`, `set`, and `post`.
-- `loc:"$"` operates on the whole file: `pre` prepends, `post` appends, `sed` runs across every line.
-- `set: []` deletes the anchored line. `set:[""]` preserves a blank line.
-- Within a single request you may submit edits in any order — the runtime applies them bottom-up so they don't shift each other. After any request that mutates a file, anchors below the mutation are stale on disk; re-read before issuing more edits to that file.
-- `set` operations target the current file content only. Do not try to reference old line text after the file has changed.
-- For token-level edits, prefer `sed` over `set`. The `loc` anchor already pins the line — repeating the entire line in a `set` array invites hallucinated content. Use the smallest `sed` pattern that uniquely identifies the change on that line; do not pad it with surrounding text just to feel safe.
-- When you do use `set`, re-read the anchored line first and copy it verbatim, changing only the required token(s). Anchor identity does not verify line content, so a hallucinated replacement will silently corrupt the file.
-- Text content must be literal file content with matching indentation. If the file uses tabs, use real tabs.
-- You **MUST NOT** use this tool to reformat or clean up unrelated code.
+- You **MUST** copy full anchors exactly from a read op (e.g. `160sr`); you **MUST NOT** send only the 2-letter suffix.
+- You **MUST** make the minimum exact edit; you **MUST NOT** reformat unrelated code.
+- A bare anchor **MUST** target one line only; you **MUST** use bracketed `splice` for balanced block rewrites.
+- You **MUST NOT** include unchanged adjacent lines in `splice`/`pre`/`post`; they shift and duplicate.
+- For bracketed `splice`, replacement braces **MUST** be balanced for the selected region.
 </critical>

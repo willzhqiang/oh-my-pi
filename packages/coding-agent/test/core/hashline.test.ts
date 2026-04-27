@@ -585,71 +585,6 @@ describe("applyHashlineEdits — heuristics", () => {
 		expect(result.lines).toBe("if (x) {\nif (x) {\n  newBody();\n}\nafter();");
 		expect(result.warnings).toBeUndefined();
 	});
-
-	it("auto-corrects leading escaped tab indentation by default", () => {
-		const previous = Bun.env.PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS;
-		delete Bun.env.PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS;
-		try {
-			const content = "root\n\tchild\n\t\tvalue\nend";
-			const edits: HashlineEdit[] = [
-				{ op: "replace_line", pos: makeTag(3, "\t\tvalue"), lines: ["\\t\\treplaced"] },
-			];
-			const result = applyHashlineEdits(content, edits);
-			expect(result.lines).toBe("root\n\tchild\n\t\treplaced\nend");
-			expect(result.warnings).toHaveLength(1);
-			expect(result.warnings?.[0]).toContain("Auto-corrected escaped tab indentation");
-		} finally {
-			if (previous === undefined) delete Bun.env.PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS;
-			else Bun.env.PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS = previous;
-		}
-	});
-
-	it("does not auto-correct escaped tab indentation when disabled by env", () => {
-		const previous = Bun.env.PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS;
-		Bun.env.PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS = "0";
-		try {
-			const content = "root\n\tchild\n\t\tvalue\nend";
-			const edits: HashlineEdit[] = [
-				{ op: "replace_line", pos: makeTag(3, "\t\tvalue"), lines: ["\\t\\treplaced"] },
-			];
-			const result = applyHashlineEdits(content, edits);
-			expect(result.lines).toBe("root\n\tchild\n\\t\\treplaced\nend");
-			expect(result.warnings).toBeUndefined();
-		} finally {
-			if (previous === undefined) delete Bun.env.PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS;
-			else Bun.env.PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS = previous;
-		}
-	});
-
-	it("preserves mixed real-tab and escaped-tab content verbatim", () => {
-		const previous = Bun.env.PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS;
-		delete Bun.env.PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS;
-		try {
-			const content = "root\n\tchild\n\t\tvalue\nend";
-			const edits: HashlineEdit[] = [
-				{
-					op: "replace_line",
-					pos: makeTag(3, "\t\tvalue"),
-					lines: ["\t\talready-tab", "\\t\\tescaped-still-literal"],
-				},
-			];
-			const result = applyHashlineEdits(content, edits);
-			expect(result.lines).toBe("root\n\tchild\n\t\talready-tab\n\\t\\tescaped-still-literal\nend");
-			expect(result.warnings).toBeUndefined();
-		} finally {
-			if (previous === undefined) delete Bun.env.PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS;
-			else Bun.env.PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS = previous;
-		}
-	});
-
-	it("warns on literal \\uDDDD without changing content", () => {
-		const content = "aaa\nbbb\nccc";
-		const edits: HashlineEdit[] = [{ op: "replace_line", pos: makeTag(2, "bbb"), lines: ["\\uDDDD"] }];
-		const result = applyHashlineEdits(content, edits);
-		expect(result.lines).toBe("aaa\n\\uDDDD\nccc");
-		expect(result.warnings).toHaveLength(1);
-		expect(result.warnings?.[0]).toContain("Detected literal \\uDDDD");
-	});
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -740,7 +675,7 @@ describe("applyHashlineEdits — errors", () => {
 		expect(() => applyHashlineEdits(content, edits)).toThrow(HashlineMismatchError);
 	});
 
-	it("stale hash error shows >>> markers with correct hashes", () => {
+	it("stale hash error shows * markers with correct hashes", () => {
 		const content = "aaa\nbbb\nccc\nddd\neee";
 		const edits: HashlineEdit[] = [
 			{ op: "replace_line", pos: parseTag(`2${staleBigramFor(2, "bbb")}`), lines: ["BBB"] },
@@ -752,11 +687,11 @@ describe("applyHashlineEdits — errors", () => {
 		} catch (err) {
 			expect(err).toBeInstanceOf(HashlineMismatchError);
 			const msg = (err as HashlineMismatchError).message;
-			// Mismatched line uses `>` separator (grep-style)
+			// Mismatched line uses leading `*` and `|` separator (grep-style)
 			const correctHash = computeLineHash(2, "bbb");
-			expect(msg).toContain(`2${correctHash}>bbb`);
-			// Context lines use `:` separator
-			const contextLines = msg.split("\n").filter(l => /^\d+[a-z]{2}:/.test(l));
+			expect(msg).toContain(`*2${correctHash}|bbb`);
+			// Context lines use leading space and `|` separator
+			const contextLines = msg.split("\n").filter(l => /^ \d+[a-z]{2}\|/.test(l));
 			expect(contextLines.length).toBeGreaterThan(0);
 		}
 	});
@@ -778,8 +713,8 @@ describe("applyHashlineEdits — errors", () => {
 			expect(e.mismatches).toHaveLength(2);
 			expect(e.mismatches[0].line).toBe(2);
 			expect(e.mismatches[1].line).toBe(4);
-			// Both mismatched lines use `>` separator (vs `:` for context)
-			const markerLines = e.message.split("\n").filter(l => /^\d+[a-z]{2}>/.test(l));
+			// Both mismatched lines use `*` prefix (vs leading space for context)
+			const markerLines = e.message.split("\n").filter(l => /^\*\d+[a-z]{2}\|/.test(l));
 			expect(markerLines).toHaveLength(2);
 		}
 	});
@@ -836,14 +771,15 @@ describe("buildCompactHashlineDiffPreview", () => {
 		expect(preview.preview).toContain(`+5${computeLineHash(5, "added")}|added`);
 	});
 
-	it("collapses long addition runs and leaves removed lines unhashed", () => {
+	it("preserves all added lines and leaves removed lines unhashed", () => {
 		const diff = ["  1|head", "+ 2|one", "+ 3|two", "+ 4|three", "+ 5|four", "- 2|old"].join("\n");
 
 		const preview = buildCompactHashlineDiffPreview(diff);
 
 		expect(preview.preview).toContain(`+2${computeLineHash(2, "one")}|one`);
 		expect(preview.preview).toContain(`+3${computeLineHash(3, "two")}|two`);
-		expect(preview.preview).toContain(" ... 2 more added lines");
+		expect(preview.preview).toContain(`+4${computeLineHash(4, "three")}|three`);
+		expect(preview.preview).toContain(`+5${computeLineHash(5, "four")}|four`);
 		expect(preview.preview).toContain("-2   |old");
 		expect(preview.preview).not.toContain(`-2${computeLineHash(2, "old")}`);
 		expect(preview.addedLines).toBe(4);
@@ -947,16 +883,16 @@ describe("stripNewLinePrefixes", () => {
 			"2re|title: example",
 			"3an|---",
 			"",
-			"[Showing lines 1-300 of 332. Use sel=L301 to continue]",
+			"[Showing lines 1-300 of 332. Use sel=301 to continue]",
 		];
 		const result = stripNewLinePrefixes(lines);
-		expect(result).not.toContain("[Showing lines 1-300 of 332. Use sel=L301 to continue]");
+		expect(result).not.toContain("[Showing lines 1-300 of 332. Use sel=301 to continue]");
 		expect(result[0]).toBe("---");
 		expect(result[1]).toBe("title: example");
 	});
 
 	it("strips hashline prefixes when generic read truncation notice is present", () => {
-		const lines = ["1an|line one", "2re|line two", "", "[42 more lines in file. Use sel=L3 to continue]"];
+		const lines = ["1an|line one", "2re|line two", "", "[42 more lines in file. Use sel=3 to continue]"];
 		const result = stripNewLinePrefixes(lines);
 		expect(result[0]).toBe("line one");
 		expect(result[1]).toBe("line two");
@@ -992,10 +928,10 @@ describe("stripHashlinePrefixes", () => {
 			"2re|title: example",
 			"3an|---",
 			"",
-			"[Showing lines 1-300 of 332. Use sel=L301 to continue]",
+			"[Showing lines 1-300 of 332. Use sel=301 to continue]",
 		];
 		const result = stripHashlinePrefixes(lines);
-		expect(result).not.toContain("[Showing lines 1-300 of 332. Use sel=L301 to continue]");
+		expect(result).not.toContain("[Showing lines 1-300 of 332. Use sel=301 to continue]");
 		expect(result[0]).toBe("---");
 		expect(result[1]).toBe("title: example");
 	});

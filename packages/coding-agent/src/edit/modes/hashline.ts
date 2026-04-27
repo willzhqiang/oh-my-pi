@@ -59,7 +59,7 @@ const HASHLINE_PREFIX_PLUS_RE = new RegExp(
 	`^\\s*(?:>>>|>>)?\\s*\\+\\s*\\d+${HASHLINE_BIGRAM_RE_SRC}${HASHLINE_CONTENT_SEPARATOR_RE}`,
 );
 const DIFF_PLUS_RE = /^[+](?![+])/;
-const READ_TRUNCATION_NOTICE_RE = /^\[(?:Showing lines \d+-\d+ of \d+|\d+ more lines? in (?:file|\S+))\b.*\bsel=L\d+/;
+const READ_TRUNCATION_NOTICE_RE = /^\[(?:Showing lines \d+-\d+ of \d+|\d+ more lines? in (?:file|\S+))\b.*\bsel=L?\d+/;
 
 type LinePrefixStats = {
 	nonEmpty: number;
@@ -525,7 +525,7 @@ const MISMATCH_CONTEXT = 2;
 /**
  * Error thrown when one or more hashline references have stale hashes.
  *
- * Displays grep-style output with `>` separator on mismatched lines and `:` on
+ * Displays grep-style output with `*` marker on mismatched lines and a leading space on
  * surrounding context, showing the correct `LINE+ID` so the caller can fix all refs at once.
  */
 export class HashlineMismatchError extends Error {
@@ -604,7 +604,7 @@ export class HashlineMismatchError extends Error {
 
 		lines.push(
 			`Edit rejected: ${mismatches.length} line${mismatches.length > 1 ? "s have" : " has"} changed since the last read. The edit was NOT applied.`,
-			"Use the updated anchors shown below (`>` marks changed lines, `:` marks context) and retry the edit.",
+			"Use the updated anchors shown below (`*` marks changed lines, leading space marks context) and retry the edit.",
 		);
 		lines.push("");
 
@@ -621,9 +621,9 @@ export class HashlineMismatchError extends Error {
 			const prefix = `${lineNum}${hash}`;
 
 			if (mismatchSet.has(lineNum)) {
-				lines.push(`${prefix}>${text}`);
+				lines.push(`*${prefix}|${text}`);
 			} else {
-				lines.push(`${prefix}:${text}`);
+				lines.push(` ${prefix}|${text}`);
 			}
 		}
 		return lines.join("\n");
@@ -679,55 +679,6 @@ export function tryRebaseAnchor(
 		found = line;
 	}
 	return found;
-}
-
-function isEscapedTabAutocorrectEnabled(): boolean {
-	switch (Bun.env.PI_HASHLINE_AUTOCORRECT_ESCAPED_TABS) {
-		case "0":
-			return false;
-		case "1":
-			return true;
-		default:
-			return true;
-	}
-}
-
-function maybeAutocorrectEscapedTabIndentation(edits: HashlineEdit[], warnings: string[]): void {
-	if (!isEscapedTabAutocorrectEnabled()) return;
-	for (const edit of edits) {
-		if (edit.lines.length === 0) continue;
-		const hasEscapedTabs = edit.lines.some(line => line.includes("\\t"));
-		if (!hasEscapedTabs) continue;
-		const hasRealTabs = edit.lines.some(line => line.includes("\t"));
-		if (hasRealTabs) continue;
-		let correctedCount = 0;
-		const corrected = edit.lines.map(line =>
-			line.replace(/^((?:\\t)+)/, escaped => {
-				correctedCount += escaped.length / 2;
-				return "\t".repeat(escaped.length / 2);
-			}),
-		);
-		if (correctedCount === 0) continue;
-		edit.lines = corrected;
-		warnings.push(
-			`Auto-corrected escaped tab indentation in edit: converted leading \\t sequence(s) to real tab characters`,
-		);
-	}
-}
-
-function maybeWarnSuspiciousUnicodeEscapePlaceholder(edits: HashlineEdit[], warnings: string[]): void {
-	for (const edit of edits) {
-		if (edit.lines.length === 0) continue;
-		if (!edit.lines.some(line => /\\uDDDD/i.test(line))) continue;
-		warnings.push(
-			`Detected literal \\uDDDD in edit content; no autocorrection applied. Verify whether this should be a real Unicode escape or plain text.`,
-		);
-	}
-}
-
-function runHashlinePreflightSanitizers(edits: HashlineEdit[], warnings: string[]): void {
-	maybeAutocorrectEscapedTabIndentation(edits, warnings);
-	maybeWarnSuspiciousUnicodeEscapePlaceholder(edits, warnings);
 }
 
 function ensureHashlineEditHasContent(edit: HashlineEdit): void {
@@ -1026,7 +977,6 @@ export function applyHashlineEdits(
 	if (mismatches.length > 0) {
 		throw new HashlineMismatchError(mismatches, fileLines);
 	}
-	runHashlinePreflightSanitizers(edits, warnings);
 	for (const edit of edits) {
 		collectBoundaryDuplicationWarning(edit, originalFileLines, warnings);
 	}
@@ -1060,7 +1010,6 @@ export interface CompactHashlineDiffPreview {
 
 export interface CompactHashlineDiffOptions {
 	maxUnchangedRun?: number;
-	maxAdditionRun?: number;
 	maxDeletionRun?: number;
 	maxOutputLines?: number;
 }
@@ -1216,7 +1165,6 @@ export function buildCompactHashlineDiffPreview(
 	options: CompactHashlineDiffOptions = {},
 ): CompactHashlineDiffPreview {
 	const maxUnchangedRun = options.maxUnchangedRun ?? 2;
-	const maxAdditionRun = options.maxAdditionRun ?? 2;
 	const maxDeletionRun = options.maxDeletionRun ?? 2;
 	const maxOutputLines = options.maxOutputLines ?? 16;
 
@@ -1235,7 +1183,7 @@ export function buildCompactHashlineDiffPreview(
 				break;
 			case "+":
 				addedLines += run.lines.length;
-				out.push(...collapseFromStart(run.lines, maxAdditionRun, "added"));
+				out.push(...run.lines);
 				break;
 			case "-":
 				removedLines += run.lines.length;

@@ -126,7 +126,7 @@ function normalizeMessagesForProvider(
 
 export const INTENT_FIELD = "_i";
 
-function injectIntentIntoSchema(schema: unknown): unknown {
+function injectIntentIntoSchema(schema: unknown, mode: "require" | "optional" = "require"): unknown {
 	if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
 	const schemaRecord = schema as Record<string, unknown>;
 	const propertiesValue = schemaRecord.properties;
@@ -141,7 +141,7 @@ function injectIntentIntoSchema(schema: unknown): unknown {
 	if (INTENT_FIELD in properties) {
 		const { [INTENT_FIELD]: intentProp, ...rest } = properties;
 		const needsReorder = Object.keys(properties)[0] !== INTENT_FIELD;
-		const needsRequired = !required.includes(INTENT_FIELD);
+		const needsRequired = mode === "require" && !required.includes(INTENT_FIELD);
 		if (!needsReorder && !needsRequired) return schema;
 		return {
 			...schemaRecord,
@@ -157,16 +157,27 @@ function injectIntentIntoSchema(schema: unknown): unknown {
 			},
 			...properties,
 		},
-		required: [...required, INTENT_FIELD],
+		...(mode === "require" ? { required: [...required, INTENT_FIELD] } : {}),
 	};
 }
 
-function normalizeTools(tools: Context["tools"], injectIntent: boolean): Context["tools"] {
-	return tools?.map(tool => ({
-		...tool,
-		description: tool.description || "",
-		...(injectIntent && { parameters: injectIntentIntoSchema(tool.parameters) as typeof tool.parameters }),
-	}));
+function normalizeTools(tools: AgentContext["tools"], injectIntent: boolean): Context["tools"] {
+	injectIntent = injectIntent && Bun.env.PI_NO_INTENT !== "1";
+	return tools?.map(t => {
+		const intentMode = resolveIntentMode(t.intent);
+		const parameters =
+			injectIntent && intentMode !== "omit"
+				? (injectIntentIntoSchema(t.parameters, intentMode) as typeof t.parameters)
+				: t.parameters;
+		const description = t.description ?? "";
+		return { ...t, parameters, description };
+	});
+}
+
+function resolveIntentMode(intent: AgentTool["intent"]): "require" | "optional" | "omit" {
+	if (typeof intent === "function") return "omit";
+	if (intent === "optional" || intent === "omit") return intent;
+	return "require";
 }
 
 function extractIntent(args: Record<string, unknown>): { intent?: string; strippedArgs: Record<string, unknown> } {
@@ -542,6 +553,15 @@ async function executeToolCalls(
 			argsForExecution = strippedArgs;
 			if (intent) {
 				toolCall.intent = intent;
+			} else if (typeof tool?.intent === "function") {
+				try {
+					const derived = tool.intent(strippedArgs as never)?.trim();
+					if (derived) {
+						toolCall.intent = derived;
+					}
+				} catch {
+					// intent function must never break tool execution
+				}
 			}
 		}
 		record.args = argsForExecution;
